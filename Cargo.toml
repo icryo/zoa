@@ -1,0 +1,32 @@
+[package]
+name = "zoa"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "3D ASCII renderer for terminals with shapes, particles, and effects"
+license = "Apache-2.0"
+repository = "https://github.com/icryo/zoa"
+keywords = ["terminal", "ascii", "3d", "ratatui", "tui"]
+categories = ["command-line-interface", "graphics", "rendering"]
+readme = "README.md"
+exclude = ["samples/*", "Cargo.lock"]
+
+[lib]
+name = "zoa"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zoa"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+tachyonfx = "0.9"
+crossterm = "0.28"
+color-eyre = "0.6"
+tobj = "4.0"
+image = { version = "0.25", default-features = false, features = ["gif"] }
+
+[features]
+default = ["gif"]
+gif = []  # GIF animation support - can be disabled if not needed
