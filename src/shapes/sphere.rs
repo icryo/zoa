@@ -1,7 +1,8 @@
-use crate::renderer::{AsciiBuffer, RenderMode, Renderer, Vec3};
-use std::f32::consts::PI;
+use super::{impl_rotating_scene, Surface};
+use crate::renderer::{AsciiBuffer, Mat3, RenderMode, Renderer, Vec3};
+use std::f32::consts::{PI, TAU};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Sphere {
     pub radius: f32,
     pub rotation: Vec3,
@@ -52,126 +53,28 @@ impl Sphere {
     }
 
     pub fn render(&self, renderer: &Renderer, buffer: &mut AsciiBuffer) {
-        self.render_with_mode(renderer, buffer, RenderMode::Solid);
-    }
-
-    pub fn render_with_mode(&self, renderer: &Renderer, buffer: &mut AsciiBuffer, mode: RenderMode) {
-        match mode {
-            RenderMode::Solid => self.render_solid(renderer, buffer),
-            RenderMode::Wireframe => self.render_wireframe(renderer, buffer),
-        }
-    }
-
-    fn render_solid(&self, renderer: &Renderer, buffer: &mut AsciiBuffer) {
-        let u_step = 2.0 * PI / self.u_steps as f32;
-        let v_step = PI / self.v_steps as f32;
-
-        for i in 0..self.u_steps {
-            let u = i as f32 * u_step;
-            let (sin_u, cos_u) = u.sin_cos();
-
-            for j in 0..=self.v_steps {
-                let v = j as f32 * v_step;
-                let (sin_v, cos_v) = v.sin_cos();
-
-                // Point on sphere surface (spherical coordinates)
-                let position = Vec3::new(
-                    self.radius * sin_v * cos_u,
-                    self.radius * cos_v,
-                    self.radius * sin_v * sin_u,
-                );
-
-                // Normal is just the normalized position for a sphere centered at origin
-                let normal = Vec3::new(
-                    sin_v * cos_u,
-                    cos_v,
-                    sin_v * sin_u,
-                );
-
-                // Apply rotations
-                let rotated_pos = position
-                    .rotate_y(self.rotation.y)
-                    .rotate_x(self.rotation.x)
-                    .rotate_z(self.rotation.z);
-
-                let rotated_normal = normal
-                    .rotate_y(self.rotation.y)
-                    .rotate_x(self.rotation.x)
-                    .rotate_z(self.rotation.z)
-                    .normalize();
-
-                renderer.render_point(buffer, rotated_pos, rotated_normal);
-            }
-        }
-    }
-
-    fn render_wireframe(&self, renderer: &Renderer, buffer: &mut AsciiBuffer) {
-        let latitude_lines = 8;
-        let longitude_lines = 12;
-        let points_per_line = 60;
-
-        // Draw latitude lines (horizontal circles)
-        for i in 1..latitude_lines {
-            let v = (i as f32 / latitude_lines as f32) * PI;
-            let (sin_v, cos_v) = v.sin_cos();
-
-            for j in 0..points_per_line {
-                let u = (j as f32 / points_per_line as f32) * 2.0 * PI;
-                let (sin_u, cos_u) = u.sin_cos();
-
-                let position = Vec3::new(
-                    self.radius * sin_v * cos_u,
-                    self.radius * cos_v,
-                    self.radius * sin_v * sin_u,
-                );
-
+        let radius = self.radius;
+        let surface = Surface {
+            // u: longitude, v: latitude from pole to pole
+            sample: |u: f32, v: f32| {
+                let (sin_u, cos_u) = (u * TAU).sin_cos();
+                let (sin_v, cos_v) = (v * PI).sin_cos();
                 let normal = Vec3::new(sin_v * cos_u, cos_v, sin_v * sin_u);
-
-                let rotated_pos = position
-                    .rotate_y(self.rotation.y)
-                    .rotate_x(self.rotation.x)
-                    .rotate_z(self.rotation.z);
-
-                let rotated_normal = normal
-                    .rotate_y(self.rotation.y)
-                    .rotate_x(self.rotation.x)
-                    .rotate_z(self.rotation.z)
-                    .normalize();
-
-                renderer.render_point(buffer, rotated_pos, rotated_normal);
-            }
-        }
-
-        // Draw longitude lines (vertical semicircles)
-        for i in 0..longitude_lines {
-            let u = (i as f32 / longitude_lines as f32) * 2.0 * PI;
-            let (sin_u, cos_u) = u.sin_cos();
-
-            for j in 0..=points_per_line {
-                let v = (j as f32 / points_per_line as f32) * PI;
-                let (sin_v, cos_v) = v.sin_cos();
-
-                let position = Vec3::new(
-                    self.radius * sin_v * cos_u,
-                    self.radius * cos_v,
-                    self.radius * sin_v * sin_u,
-                );
-
-                let normal = Vec3::new(sin_v * cos_u, cos_v, sin_v * sin_u);
-
-                let rotated_pos = position
-                    .rotate_y(self.rotation.y)
-                    .rotate_x(self.rotation.x)
-                    .rotate_z(self.rotation.z);
-
-                let rotated_normal = normal
-                    .rotate_y(self.rotation.y)
-                    .rotate_x(self.rotation.x)
-                    .rotate_z(self.rotation.z)
-                    .normalize();
-
-                renderer.render_point(buffer, rotated_pos, rotated_normal);
-            }
+                (normal * radius, normal)
+            },
+            rotation: Mat3::from_rotation(self.rotation),
+        };
+        match renderer.mode {
+            RenderMode::Solid => surface.render_solid(renderer, buffer, self.u_steps, self.v_steps),
+            RenderMode::Wireframe => surface.render_wireframe(
+                renderer,
+                buffer,
+                (0..12).map(|i| i as f32 / 12.0),
+                (1..8).map(|i| i as f32 / 8.0),
+                60,
+            ),
         }
     }
 }
+
+impl_rotating_scene!(Sphere);

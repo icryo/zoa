@@ -10,6 +10,9 @@ A 3D ASCII renderer for terminals, built on [ratatui](https://github.com/ratatui
 - **Animated GIFs** - Render GIFs as ASCII art
 - **Countdown Timer** - Large ASCII digit display
 - **Multiple Styles** - ASCII, blocks, braille, hatching characters
+- **Sub-cell Pixels** - Half-block, quadrant, sextant, octant and braille modes pack
+  several two-color pixels into each character cell; plain Unicode text, no
+  terminal graphics protocol needed
 - **Color Palettes** - Cyan, fire, matrix, purple, rainbow, grayscale
 
 ## Installation
@@ -65,6 +68,65 @@ let config = ZoaConfig {
 let mut widget = ZoaWidget::new(config);
 ```
 
+## Pixel Modes
+
+By default each cell shows one pixel as a character from the `CharStyle` ramp.
+`PixelMode` packs more pixels into each cell, using foreground and background
+colors:
+
+| Mode | Pixels per cell | Support |
+|------|-----------------|---------|
+| `Cell` | 1 (character ramp) | Everywhere |
+| `HalfBlock` | 1x2 | Everywhere |
+| `Quadrant` | 2x2 | Nearly everywhere |
+| `Sextant` | 2x3 | Fonts with Unicode 13 "legacy computing" symbols |
+| `Octant` | 2x4 | Fonts with Unicode 16 octants |
+| `Braille` | 2x4 dots, one color | Wherever braille renders |
+
+```rust
+use zoa::{PixelMode, ZoaConfig, ZoaWidget};
+
+let widget = ZoaWidget::new(ZoaConfig {
+    pixel_mode: PixelMode::HalfBlock,
+    ..Default::default()
+});
+```
+
+In `Cell` mode, `ZoaConfig::dither` enables ordered dithering between ramp
+characters to smooth gradients.
+
+## Any Scene in the Widget
+
+Particle systems, SDF scenes, and your own types can be shown in the widget
+through the `Scene` trait:
+
+```rust
+use zoa::{ParticlePreset, ParticleSystem, Scene, ZoaWidget};
+
+let mut widget = ZoaWidget::default();
+widget.set_scene(ParticleSystem::with_preset(ParticlePreset::Fire));
+
+// Your own scene: animate in `update`, draw in `render`
+struct Pulse(f32);
+impl Scene for Pulse {
+    fn update(&mut self, dt: f32) { self.0 += dt; }
+    fn render(&self, _: &zoa::Renderer, buffer: &mut zoa::AsciiBuffer) {
+        buffer.plot(buffer.width / 2, buffer.height / 2, 1.0, self.0.sin().abs());
+    }
+}
+widget.set_scene(Pulse(0.0));
+```
+
+## Cargo Features
+
+| Feature | Default | Enables |
+|---------|---------|---------|
+| `gif` | yes | Animated GIF support (pulls in `image`) |
+| `cli` | yes | The `zoa` binary (pulls in `crossterm`, `tachyonfx`, `color-eyre`) |
+
+Library users can trim dependencies with
+`zoa = { version = "0.1", default-features = false }`.
+
 ## CLI
 
 ```bash
@@ -92,6 +154,8 @@ zoa --timer
 | `s` | Cycle shapes |
 | `c` | Cycle character styles |
 | `p` | Cycle color palettes |
+| `p` | Cycle pixel modes |
+| `d` | Toggle dithering |
 | `m` | Toggle wireframe/solid |
 | `+`/`-` | Zoom in/out |
 | `[`/`]` | Adjust speed |

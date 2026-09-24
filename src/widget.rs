@@ -12,19 +12,18 @@
 //! }
 //! ```
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Style,
-    widgets::Widget,
-};
+use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 
-use crate::renderer::{AsciiBuffer, CharStyle, ColorPalette, RenderMode, Renderer};
-use crate::shapes::{AnimatedGif, Countdown, Cube, Mesh, Sphere, Torus};
+use crate::error::Result;
+use crate::renderer::{AsciiBuffer, CharStyle, ColorPalette, PixelMode, RenderMode, Renderer, CHAR_ASPECT};
+use crate::scene::Scene;
+#[cfg(feature = "gif")]
+use crate::shapes::AnimatedGif;
+use crate::shapes::{Countdown, Cube, Mesh, Sphere, Torus};
 use std::time::Duration;
 
 /// Which shape to render
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Shape {
     #[default]
     Torus,
@@ -43,16 +42,25 @@ impl Shape {
 }
 
 /// Configuration for the ZoaWidget
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ZoaConfig {
     pub shape: Shape,
     pub char_style: CharStyle,
     pub palette: ColorPalette,
     pub render_mode: RenderMode,
     pub speed: f32,
+    /// Tessellation detail for the torus and sphere (8 = default)
     pub density: usize,
     pub zoom: f32,
     pub auto_rotate: bool,
+    /// Show GIFs in their own colors instead of the palette
+    pub true_color: bool,
+    /// How cells display pixels: one character per cell (`Cell`, using
+    /// `char_style`) or several block/braille pixels per cell
+    pub pixel_mode: PixelMode,
+    /// Ordered dithering between `char_style` characters in `Cell` mode,
+    /// to smooth out banding in gradients
+    pub dither: bool,
 }
 
 impl Default for ZoaConfig {
@@ -66,24 +74,65 @@ impl Default for ZoaConfig {
             density: 8,
             zoom: 1.0,
             auto_rotate: true,
+            true_color: false,
+            pixel_mode: PixelMode::default(),
+            dither: false,
         }
+    }
+}
+
+/// Content shown instead of the built-in shape
+enum Content {
+    Mesh(Mesh),
+    #[cfg(feature = "gif")]
+    Gif(AnimatedGif),
+    Countdown(Countdown),
+    Custom(Box<dyn Scene + Send>),
+}
+
+impl Content {
+    fn scene(&self) -> &dyn Scene {
+        match self {
+            Self::Mesh(mesh) => mesh,
+            #[cfg(feature = "gif")]
+            Self::Gif(gif) => gif,
+            Self::Countdown(countdown) => countdown,
+            Self::Custom(scene) => scene.as_ref(),
+        }
+    }
+
+    fn scene_mut(&mut self) -> &mut dyn Scene {
+        match self {
+            Self::Mesh(mesh) => mesh,
+            #[cfg(feature = "gif")]
+            Self::Gif(gif) => gif,
+            Self::Countdown(countdown) => countdown,
+            Self::Custom(scene) => scene.as_mut(),
+        }
+    }
+
+    /// Whether this content only moves when auto-rotation is on
+    fn is_rotating(&self) -> bool {
+        matches!(self, Self::Mesh(_))
     }
 }
 
 /// A ratatui Widget that renders a rotating 3D ASCII shape.
 ///
 /// This widget can be easily embedded in any ratatui application.
-/// Call `update(dt)` each frame to advance the animation.
+/// Call `update(dt)` each frame to advance the animation. Besides the
+/// built-in shapes it can show a mesh, a GIF, a countdown, or any
+/// [`Scene`] (particles, SDF scenes, or your own) via [`set_scene`](Self::set_scene).
 pub struct ZoaWidget {
     torus: Torus,
     cube: Cube,
     sphere: Sphere,
-    custom_mesh: Option<Mesh>,
-    gif: Option<AnimatedGif>,
-    countdown: Option<Countdown>,
+    content: Option<Content>,
     renderer: Renderer,
     buffer: AsciiBuffer,
     config: ZoaConfig,
+    /// Config last pushed into the shapes, so `config_mut` edits get picked up
+    applied_config: ZoaConfig,
 }
 
 impl Default for ZoaWidget {
@@ -99,11 +148,10 @@ impl ZoaWidget {
             torus: Torus::default(),
             cube: Cube::default(),
             sphere: Sphere::default(),
-            custom_mesh: None,
-            gif: None,
-            countdown: None,
+            content: None,
             renderer: Renderer::default(),
             buffer: AsciiBuffer::new(80, 24),
+            applied_config: config.clone(),
             config,
         };
         widget.apply_config();
@@ -113,11 +161,11 @@ impl ZoaWidget {
     /// Create with a custom mesh
     pub fn with_mesh(mesh: Mesh) -> Self {
         let mut widget = Self::default();
-        widget.custom_mesh = Some(mesh);
+        widget.set_content(Content::Mesh(mesh));
         widget
     }
 
-    /// Get mutable access to config
+    /// Get mutable access to config. Changes take effect on the next `update`.
     pub fn config_mut(&mut self) -> &mut ZoaConfig {
         &mut self.config
     }
@@ -127,14 +175,20 @@ impl ZoaWidget {
         &self.config
     }
 
-    /// Set the shape to render
+    /// Set the built-in shape to render (clears any loaded content)
     pub fn set_shape(&mut self, shape: Shape) {
         self.config.shape = shape;
+        self.content = None;
     }
 
     /// Set the character style
     pub fn set_char_style(&mut self, style: CharStyle) {
         self.config.char_style = style;
+    }
+
+    /// Set how cells display pixels (see [`PixelMode`])
+    pub fn set_pixel_mode(&mut self, mode: PixelMode) {
+        self.config.pixel_mode = mode;
     }
 
     /// Set the color palette
@@ -145,6 +199,7 @@ impl ZoaWidget {
     /// Set the render mode (solid or wireframe)
     pub fn set_render_mode(&mut self, mode: RenderMode) {
         self.config.render_mode = mode;
+        self.apply_config();
     }
 
     /// Set zoom level (0.3 to 3.0)
@@ -164,198 +219,196 @@ impl ZoaWidget {
         self.config.auto_rotate = auto;
     }
 
-    /// Manually rotate the current shape
+    /// Manually rotate whatever is currently shown
     pub fn rotate(&mut self, dx: f32, dy: f32) {
-        match self.config.shape {
-            Shape::Torus => {
-                self.torus.rotation.x += dx;
-                self.torus.rotation.y += dy;
-            }
-            Shape::Cube => {
-                self.cube.rotation.x += dx;
-                self.cube.rotation.y += dy;
-            }
-            Shape::Sphere => {
-                self.sphere.rotation.x += dx;
-                self.sphere.rotation.y += dy;
-            }
-        }
-        if let Some(ref mut mesh) = self.custom_mesh {
-            mesh.rotation.x += dx;
-            mesh.rotation.y += dy;
-        }
+        self.active_scene_mut().rotate(dx, dy);
+    }
+
+    /// Show any [`Scene`] (e.g. a `ParticleSystem`, `SdfScene`, or your own
+    /// type) instead of the built-in shape
+    pub fn set_scene(&mut self, scene: impl Scene + Send + 'static) {
+        self.set_content(Content::Custom(Box::new(scene)));
+    }
+
+    /// Remove any loaded mesh, GIF, countdown or scene, returning to the
+    /// built-in shape
+    pub fn clear_content(&mut self) {
+        self.content = None;
     }
 
     /// Load a custom mesh from file
-    pub fn load_mesh(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let mesh = Mesh::from_file(path)?;
-        self.custom_mesh = Some(mesh);
-        self.gif = None; // Clear any loaded GIF
+    pub fn load_mesh(&mut self, path: &std::path::Path) -> Result<()> {
+        self.set_content(Content::Mesh(Mesh::from_file(path)?));
         Ok(())
     }
 
     /// Load an animated GIF from file
-    pub fn load_gif(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let gif = AnimatedGif::from_file(path)?;
-        self.gif = Some(gif);
-        self.custom_mesh = None; // Clear any loaded mesh
+    #[cfg(feature = "gif")]
+    pub fn load_gif(&mut self, path: &std::path::Path) -> Result<()> {
+        self.set_content(Content::Gif(AnimatedGif::from_file(path)?));
         Ok(())
     }
 
     /// Check if a GIF is currently loaded
+    #[cfg(feature = "gif")]
     pub fn has_gif(&self) -> bool {
-        self.gif.is_some()
+        matches!(self.content, Some(Content::Gif(_)))
+    }
+
+    /// Check if a custom mesh is currently loaded
+    pub fn has_mesh(&self) -> bool {
+        matches!(self.content, Some(Content::Mesh(_)))
     }
 
     /// Start a countdown timer with the given duration
     pub fn start_countdown(&mut self, duration: Duration) {
         let mut countdown = Countdown::new(duration);
         countdown.start();
-        self.countdown = Some(countdown);
-        self.gif = None;
-        self.custom_mesh = None;
+        self.set_content(Content::Countdown(countdown));
     }
 
     /// Parse and start a countdown from a string (e.g., "5m", "1:30")
-    pub fn start_countdown_from_str(&mut self, duration_str: &str) -> Result<(), String> {
+    pub fn start_countdown_from_str(&mut self, duration_str: &str) -> Result<()> {
         let mut countdown = Countdown::parse(duration_str)?;
         countdown.start();
-        self.countdown = Some(countdown);
-        self.gif = None;
-        self.custom_mesh = None;
+        self.set_content(Content::Countdown(countdown));
         Ok(())
     }
 
     /// Check if a countdown is currently active
     pub fn has_countdown(&self) -> bool {
-        self.countdown.is_some()
+        matches!(self.content, Some(Content::Countdown(_)))
     }
 
     /// Toggle countdown pause/resume
     pub fn toggle_countdown_pause(&mut self) {
-        if let Some(ref mut countdown) = self.countdown {
+        if let Some(countdown) = self.countdown_mut() {
             countdown.toggle_pause();
         }
     }
 
     /// Reset countdown to initial duration
     pub fn reset_countdown(&mut self) {
-        if let Some(ref mut countdown) = self.countdown {
+        if let Some(countdown) = self.countdown_mut() {
             countdown.reset();
         }
     }
 
-    fn apply_config(&mut self) {
-        let density = self.config.density;
-        let speed = self.config.speed;
-        let zoom = self.config.zoom;
-
-        // Apply density
-        self.torus.set_detail(
-            (50.0 * (density as f32 / 8.0)) as usize,
-            (25.0 * (density as f32 / 8.0)) as usize,
-        );
-        self.cube.set_density(density * 3);
-        self.sphere.set_detail(
-            (40.0 * (density as f32 / 8.0)) as usize,
-            (20.0 * (density as f32 / 8.0)) as usize,
-        );
-        if let Some(ref mut mesh) = self.custom_mesh {
-            mesh.set_density(density);
+    fn countdown_mut(&mut self) -> Option<&mut Countdown> {
+        match &mut self.content {
+            Some(Content::Countdown(countdown)) => Some(countdown),
+            _ => None,
         }
+    }
 
-        // Apply speed
+    fn set_content(&mut self, content: Content) {
+        self.content = Some(content);
+        self.apply_config(); // Match the configured detail, speed and zoom
+    }
+
+    fn active_scene(&self) -> &dyn Scene {
+        match &self.content {
+            Some(content) => content.scene(),
+            None => match self.config.shape {
+                Shape::Torus => &self.torus,
+                Shape::Cube => &self.cube,
+                Shape::Sphere => &self.sphere,
+            },
+        }
+    }
+
+    fn active_scene_mut(&mut self) -> &mut dyn Scene {
+        match &mut self.content {
+            Some(content) => content.scene_mut(),
+            None => match self.config.shape {
+                Shape::Torus => &mut self.torus,
+                Shape::Cube => &mut self.cube,
+                Shape::Sphere => &mut self.sphere,
+            },
+        }
+    }
+
+    fn apply_config(&mut self) {
+        self.applied_config = self.config.clone();
+        let ZoaConfig { density, speed, zoom, render_mode, .. } = self.config;
+        let detail = density as f32 / 8.0;
+
+        self.torus.set_detail((50.0 * detail) as usize, (25.0 * detail) as usize);
+        self.sphere.set_detail((40.0 * detail) as usize, (20.0 * detail) as usize);
+
         self.torus.set_speed_multiplier(speed);
         self.cube.set_speed_multiplier(speed);
         self.sphere.set_speed_multiplier(speed);
-        if let Some(ref mut mesh) = self.custom_mesh {
-            mesh.set_speed_multiplier(speed);
+
+        match &mut self.content {
+            Some(Content::Mesh(mesh)) => mesh.set_speed_multiplier(speed),
+            #[cfg(feature = "gif")]
+            Some(Content::Gif(gif)) => {
+                gif.set_scale(zoom);
+                gif.set_true_color(self.config.true_color);
+            }
+            Some(Content::Countdown(countdown)) => countdown.set_scale(zoom),
+            Some(Content::Custom(_)) | None => {}
         }
 
-        // Apply zoom
-        self.renderer.camera.scale = 40.0 * zoom;
+        self.renderer.camera.scale = zoom;
         self.renderer.camera.distance = 5.0 / zoom;
+        self.renderer.mode = render_mode;
     }
 
     /// Update animation state. Call this each frame with delta time in seconds.
     pub fn update(&mut self, dt: f32) {
-        // GIF always animates (it's frame-based, not rotation)
-        if let Some(ref mut gif) = self.gif {
-            gif.update(dt);
-            return;
+        if self.config != self.applied_config {
+            self.apply_config();
         }
 
-        // Countdown always updates
-        if let Some(ref mut countdown) = self.countdown {
-            countdown.update(dt);
-            return;
+        // Rotating shapes pause when auto-rotate is off; GIFs, countdowns and
+        // custom scenes always animate
+        let rotating = self.content.as_ref().is_none_or(Content::is_rotating);
+        if self.config.auto_rotate || !rotating {
+            self.active_scene_mut().update(dt);
         }
+    }
 
-        if self.config.auto_rotate {
-            match self.config.shape {
-                Shape::Torus => self.torus.update(dt),
-                Shape::Cube => self.cube.update(dt),
-                Shape::Sphere => self.sphere.update(dt),
-            }
-            if let Some(ref mut mesh) = self.custom_mesh {
-                mesh.update(dt);
-            }
+    /// The pixel mode actually used for the current content
+    fn effective_pixel_mode(&self) -> PixelMode {
+        if self.active_scene().supports_pixels() {
+            self.config.pixel_mode
+        } else {
+            PixelMode::Cell
         }
     }
 
     fn render_to_buffer(&mut self, width: u16, height: u16) {
-        self.buffer.resize(width, height);
-        self.buffer.clear();
+        let mode = self.effective_pixel_mode();
+        let (sx, sy) = mode.subdivisions();
 
-        // GIF renders directly to buffer (handles its own scaling)
-        if let Some(ref gif) = self.gif {
-            gif.render(&mut self.buffer);
-            return;
-        }
-
-        // Countdown renders directly to buffer
-        if let Some(ref countdown) = self.countdown {
-            countdown.render(&mut self.buffer);
-            return;
-        }
-
-        let mode = self.config.render_mode;
-
-        if let Some(ref mesh) = self.custom_mesh {
-            mesh.render(&self.renderer, &mut self.buffer);
-        } else {
-            match self.config.shape {
-                Shape::Torus => self.torus.render_with_mode(&self.renderer, &mut self.buffer, mode),
-                Shape::Cube => self.cube.render_with_mode(&self.renderer, &mut self.buffer, mode),
-                Shape::Sphere => self.sphere.render_with_mode(&self.renderer, &mut self.buffer, mode),
-            }
-        }
+        // Move the buffer out so the scene can be borrowed alongside it
+        let mut buffer = std::mem::replace(&mut self.buffer, AsciiBuffer::new(0, 0));
+        buffer.resize(width.saturating_mul(sx), height.saturating_mul(sy));
+        buffer.pixel_aspect = mode.pixel_aspect(CHAR_ASPECT);
+        buffer.clear();
+        self.active_scene().render(&self.renderer, &mut buffer);
+        self.buffer = buffer;
     }
 }
 
 impl Widget for &mut ZoaWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
         self.render_to_buffer(area.width, area.height);
-
-        for y in 0..area.height.min(self.buffer.height) {
-            for x in 0..area.width.min(self.buffer.width) {
-                if let Some(fragment) = self.buffer.get(x, y) {
-                    let ch = self.config.char_style.to_char(fragment.luminance);
-                    let color = self.config.palette.to_color(fragment.luminance);
-                    buf[(area.x + x, area.y + y)]
-                        .set_char(ch)
-                        .set_style(Style::default().fg(color));
-                }
-            }
-        }
+        let ZoaConfig { char_style, palette, dither, .. } = self.config;
+        let mode = self.effective_pixel_mode();
+        self.buffer.draw_pixels(area, buf, mode, char_style, palette, dither);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "gif")]
     use std::path::Path;
 
+    #[cfg(feature = "gif")]
     #[test]
     fn test_widget_load_gif() {
         let gif_path = Path::new("samples/test.gif");
@@ -379,6 +432,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gif")]
     #[test]
     fn test_widget_gif_clears_mesh() {
         let gif_path = Path::new("samples/test.gif");
@@ -391,7 +445,7 @@ mod tests {
         // Loading GIF should work even without prior mesh
         widget.load_gif(gif_path).expect("Failed to load GIF");
         assert!(widget.has_gif());
-        assert!(widget.custom_mesh.is_none());
+        assert!(!widget.has_mesh());
     }
 
     #[test]
@@ -413,6 +467,17 @@ mod tests {
             widget.render_to_buffer(3, 3);
         }
 
+        // Every pixel mode, including tiny areas
+        for mode in [PixelMode::HalfBlock, PixelMode::Quadrant, PixelMode::Sextant, PixelMode::Octant, PixelMode::Braille] {
+            widget.set_pixel_mode(mode);
+            for (w, h) in [(0, 0), (1, 1), (3, 2), (80, 24)] {
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                (&mut widget).render(area, &mut buf);
+            }
+        }
+        widget.set_pixel_mode(PixelMode::Cell);
+
         // Test countdown at tiny sizes
         widget.start_countdown_from_str("1:00").unwrap();
         widget.render_to_buffer(0, 0);
@@ -421,13 +486,16 @@ mod tests {
         widget.render_to_buffer(5, 3);
 
         // Test GIF at tiny sizes if available
-        let gif_path = Path::new("samples/test.gif");
-        if gif_path.exists() {
-            let mut widget = ZoaWidget::default();
-            widget.load_gif(gif_path).unwrap();
-            widget.render_to_buffer(0, 0);
-            widget.render_to_buffer(1, 1);
-            widget.render_to_buffer(3, 2);
+        #[cfg(feature = "gif")]
+        {
+            let gif_path = Path::new("samples/test.gif");
+            if gif_path.exists() {
+                let mut widget = ZoaWidget::default();
+                widget.load_gif(gif_path).unwrap();
+                widget.render_to_buffer(0, 0);
+                widget.render_to_buffer(1, 1);
+                widget.render_to_buffer(3, 2);
+            }
         }
     }
 }

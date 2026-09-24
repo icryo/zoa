@@ -46,11 +46,17 @@
 //! }
 //! ```
 
+pub mod error;
 pub mod renderer;
+pub mod scene;
 pub mod shapes;
 pub mod widget;
 
 // Re-export main types for convenience
-pub use renderer::{AsciiBuffer, Camera, CharStyle, ColorPalette, Fragment, RenderMode, Renderer, Vec3};
-pub use shapes::{AnimatedGif, Countdown, Cube, Mesh, ParticlePreset, ParticleSystem, SdfPreset, SdfScene, Sphere, Torus, Triangle};
+pub use error::{Error, Result};
+pub use renderer::{AsciiBuffer, Camera, CharStyle, ColorPalette, Fragment, Mat3, PixelMode, RenderMode, Renderer, Vec3, CHAR_ASPECT};
+pub use scene::Scene;
+#[cfg(feature = "gif")]
+pub use shapes::AnimatedGif;
+pub use shapes::{Countdown, Cube, Mesh, ParticlePreset, ParticleSystem, SdfPreset, SdfScene, Sphere, Torus, Triangle};
 pub use widget::{ZoaConfig, ZoaWidget, Shape};

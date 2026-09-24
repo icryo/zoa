@@ -2,7 +2,7 @@
 name = "zoa"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.85"
 description = "3D ASCII renderer for terminals with shapes, particles, and effects"
 license = "Apache-2.0"
 repository = "https://github.com/icryo/zoa"
@@ -18,15 +18,34 @@ path = "src/lib.rs"
 [[bin]]
 name = "zoa"
 path = "src/main.rs"
+required-features = ["cli", "gif"]
+
+[[example]]
+name = "gif_demo"
+required-features = ["gif"]
+
+[[example]]
+name = "showcase"
+required-features = ["gif"]
+
+[[example]]
+name = "stress_test"
+required-features = ["gif"]
 
 [dependencies]
 ratatui = "0.29"
-tachyonfx = "0.9"
+tobj = "4.0"
+image = { version = "0.25", default-features = false, features = ["gif"], optional = true }
+# Only needed by the `zoa` binary
+tachyonfx = { version = "0.9", optional = true }
+crossterm = { version = "0.28", optional = true }
+color-eyre = { version = "0.6", optional = true }
+
+[dev-dependencies]
 crossterm = "0.28"
 color-eyre = "0.6"
-tobj = "4.0"
-image = { version = "0.25", default-features = false, features = ["gif"] }
 
 [features]
-default = ["gif"]
-gif = []  # GIF animation support - can be disabled if not needed
+default = ["gif", "cli"]
+gif = ["dep:image"]  # GIF animation support - disable to drop the image dependency
+cli = ["dep:tachyonfx", "dep:crossterm", "dep:color-eyre"]  # The `zoa` binary; library users can disable it

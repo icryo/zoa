@@ -1,4 +1,4 @@
-use crate::renderer::AsciiBuffer;
+use crate::renderer::{AsciiBuffer, Renderer, Vec3};
 
 /// A single particle with position, velocity, and lifetime
 #[derive(Clone)]
@@ -45,7 +45,7 @@ impl Particle {
 }
 
 /// Emitter shape for spawning particles
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EmitterShape {
     Point,
     Line { length: f32 },
@@ -54,7 +54,7 @@ pub enum EmitterShape {
 }
 
 /// Preset particle effects
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ParticlePreset {
     #[default]
     Fire,
@@ -113,7 +113,7 @@ pub struct ParticleSystem {
     speed_max: f32,
     life_min: f32,
     life_max: f32,
-    spread: f32,      // cone angle in radians
+    spread: f32,      // half-angle of the emission cone, in radians
     direction: (f32, f32, f32), // normalized emission direction
 
     // Physics
@@ -188,7 +188,7 @@ impl ParticleSystem {
                 self.speed_max = 3.0;
                 self.life_min = 0.8;
                 self.life_max = 1.5;
-                self.spread = 0.4;
+                self.spread = 0.2;
                 self.direction = (0.0, 1.0, 0.0);
                 self.gravity = -0.5; // negative = upward
                 self.drag = 1.0;
@@ -201,7 +201,7 @@ impl ParticleSystem {
                 self.speed_max = 1.5;
                 self.life_min = 2.0;
                 self.life_max = 4.0;
-                self.spread = 0.6;
+                self.spread = 0.3;
                 self.direction = (0.0, 1.0, 0.0);
                 self.gravity = -0.2;
                 self.drag = 0.5;
@@ -214,7 +214,7 @@ impl ParticleSystem {
                 self.speed_max = 12.0;
                 self.life_min = 0.8;
                 self.life_max = 1.2;
-                self.spread = 0.05;
+                self.spread = 0.025;
                 self.direction = (0.0, -1.0, 0.0);
                 self.gravity = 5.0;
                 self.drag = 0.0;
@@ -227,7 +227,7 @@ impl ParticleSystem {
                 self.speed_max = 1.5;
                 self.life_min = 3.0;
                 self.life_max = 5.0;
-                self.spread = 0.8;
+                self.spread = 0.4;
                 self.direction = (0.0, -1.0, 0.0);
                 self.gravity = 0.3;
                 self.drag = 2.0;
@@ -253,7 +253,7 @@ impl ParticleSystem {
                 self.speed_max = 5.0;
                 self.life_min = 1.5;
                 self.life_max = 2.5;
-                self.spread = 0.3;
+                self.spread = 0.15;
                 self.direction = (0.0, 1.0, 0.0);
                 self.gravity = 4.0;
                 self.drag = 0.1;
@@ -321,17 +321,11 @@ impl ParticleSystem {
             }
         }
 
-        // Calculate velocity with spread
+        // Velocity: a random direction within the emission cone
         let speed = self.speed_min + fastrand() * (self.speed_max - self.speed_min);
         let (dx, dy, dz) = self.direction;
-
-        // Add random spread
-        let spread_x = (fastrand() - 0.5) * self.spread;
-        let spread_z = (fastrand() - 0.5) * self.spread;
-
-        let vx = dx * speed + spread_x * speed;
-        let vy = dy * speed;
-        let vz = dz * speed + spread_z * speed;
+        let dir = random_in_cone(Vec3::new(dx, dy, dz), self.spread);
+        let (vx, vy, vz) = (dir.x * speed, dir.y * speed, dir.z * speed);
 
         let life = self.life_min + fastrand() * (self.life_max - self.life_min);
 
@@ -357,7 +351,13 @@ impl ParticleSystem {
         self.particles.retain(|p| p.alive());
     }
 
+    /// Render with the default zoom
     pub fn render(&self, buffer: &mut AsciiBuffer) {
+        self.render_scaled(buffer, 1.0);
+    }
+
+    /// Render with a zoom factor (`1.0` = default)
+    pub fn render_scaled(&self, buffer: &mut AsciiBuffer, zoom: f32) {
         let buf_width = buffer.width as f32;
         let buf_height = buffer.height as f32;
 
@@ -365,13 +365,15 @@ impl ParticleSystem {
             return;
         }
 
-        let scale = buf_height.min(buf_width) * 0.1;
+        // Rows per world unit; columns scaled by the pixel shape to keep proportions
+        let aspect = buffer.pixel_aspect;
+        let scale = buf_height.min(buf_width / aspect) * 0.15 * zoom;
         let center_x = buf_width / 2.0;
         let center_y = buf_height / 2.0;
 
         for particle in &self.particles {
             // Simple orthographic projection
-            let screen_x = center_x + particle.x * scale;
+            let screen_x = center_x + particle.x * scale * aspect;
             let screen_y = center_y - particle.y * scale; // flip Y
 
             if screen_x >= 0.0 && screen_x < buf_width && screen_y >= 0.0 && screen_y < buf_height {
@@ -387,11 +389,35 @@ impl ParticleSystem {
     }
 }
 
+/// Uniformly random unit vector within `half_angle` radians of `axis`
+fn random_in_cone(axis: Vec3, half_angle: f32) -> Vec3 {
+    let axis = axis.normalize();
+    let cos_theta = 1.0 - fastrand() * (1.0 - half_angle.min(std::f32::consts::PI).cos());
+    let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+    let phi = fastrand() * std::f32::consts::TAU;
+
+    // Orthonormal basis around the axis
+    let helper = if axis.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) };
+    let t = axis.cross(helper).normalize();
+    let b = axis.cross(t);
+    axis * cos_theta + (t * phi.cos() + b * phi.sin()) * sin_theta
+}
+
+impl crate::scene::Scene for ParticleSystem {
+    fn update(&mut self, dt: f32) {
+        ParticleSystem::update(self, dt)
+    }
+
+    fn render(&self, renderer: &Renderer, buffer: &mut AsciiBuffer) {
+        self.render_scaled(buffer, renderer.camera.scale)
+    }
+}
+
 /// Simple fast random (xorshift)
 fn fastrand() -> f32 {
     use std::cell::Cell;
     thread_local! {
-        static STATE: Cell<u32> = Cell::new(0xDEADBEEF);
+        static STATE: Cell<u32> = const { Cell::new(0xDEADBEEF) };
     }
     STATE.with(|s| {
         let mut x = s.get();
@@ -438,6 +464,21 @@ mod tests {
             sys.update(0.1);
             // Should not crash
         }
+    }
+
+    #[test]
+    fn test_full_sphere_spread_goes_every_direction() {
+        let mut sys = ParticleSystem::with_preset(ParticlePreset::Explosion);
+        sys.burst(500);
+        let down = sys.particles.iter().filter(|p| p.vy < 0.0).count();
+        let up = sys.particles.iter().filter(|p| p.vy > 0.0).count();
+        assert!(down > 100 && up > 100, "up={up} down={down}");
+    }
+
+    #[test]
+    fn test_zero_spread_is_straight() {
+        let d = random_in_cone(Vec3::new(0.0, -1.0, 0.0), 0.0);
+        assert!((d.y + 1.0).abs() < 1e-5 && d.x.abs() < 1e-5);
     }
 
     #[test]

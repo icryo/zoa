@@ -3,7 +3,8 @@
 //! Displays a countdown timer using seven-segment style ASCII art digits,
 //! inspired by https://github.com/antonmedv/countdown
 
-use crate::renderer::AsciiBuffer;
+use crate::error::{Error, Result};
+use crate::renderer::{AsciiBuffer, Fragment, Renderer};
 use std::time::{Duration, Instant};
 
 /// Large ASCII digit font (7 lines tall)
@@ -138,7 +139,7 @@ fn pattern_width(pattern: &[&str]) -> usize {
 }
 
 /// Countdown timer state
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CountdownState {
     Running,
     Paused,
@@ -191,7 +192,11 @@ impl Countdown {
 
     /// Create from hours, minutes, seconds
     pub fn from_hms(hours: u64, minutes: u64, seconds: u64) -> Self {
-        let duration = Duration::from_secs(hours * 3600 + minutes * 60 + seconds);
+        let secs = hours
+            .saturating_mul(3600)
+            .saturating_add(minutes.saturating_mul(60))
+            .saturating_add(seconds);
+        let duration = Duration::from_secs(secs);
         Self::new(duration)
     }
 
@@ -206,25 +211,26 @@ impl Countdown {
     }
 
     /// Parse duration string like "1h2m3s", "5m", "30s", "1:30", "1:30:00"
-    pub fn parse(s: &str) -> Result<Self, String> {
+    pub fn parse(s: &str) -> Result<Self> {
         let s = s.trim();
+        let invalid = |what: &str| Error::InvalidDuration(format!("invalid {what} in '{s}'"));
 
         // Try parsing as colon-separated (MM:SS or HH:MM:SS)
         if s.contains(':') {
             let parts: Vec<&str> = s.split(':').collect();
             match parts.len() {
                 2 => {
-                    let mins: u64 = parts[0].parse().map_err(|_| "Invalid minutes")?;
-                    let secs: u64 = parts[1].parse().map_err(|_| "Invalid seconds")?;
+                    let mins: u64 = parts[0].parse().map_err(|_| invalid("minutes"))?;
+                    let secs: u64 = parts[1].parse().map_err(|_| invalid("seconds"))?;
                     return Ok(Self::from_ms(mins, secs));
                 }
                 3 => {
-                    let hrs: u64 = parts[0].parse().map_err(|_| "Invalid hours")?;
-                    let mins: u64 = parts[1].parse().map_err(|_| "Invalid minutes")?;
-                    let secs: u64 = parts[2].parse().map_err(|_| "Invalid seconds")?;
+                    let hrs: u64 = parts[0].parse().map_err(|_| invalid("hours"))?;
+                    let mins: u64 = parts[1].parse().map_err(|_| invalid("minutes"))?;
+                    let secs: u64 = parts[2].parse().map_err(|_| invalid("seconds"))?;
                     return Ok(Self::from_hms(hrs, mins, secs));
                 }
-                _ => return Err("Invalid time format".to_string()),
+                _ => return Err(invalid("time format")),
             }
         }
 
@@ -235,25 +241,34 @@ impl Countdown {
         for c in s.chars() {
             if c.is_ascii_digit() {
                 current_num.push(c);
+            } else if c.is_whitespace() {
+                continue;
             } else {
-                let num: u64 = current_num.parse().unwrap_or(0);
+                let multiplier = match c {
+                    'h' | 'H' => 3600,
+                    'm' | 'M' => 60,
+                    's' | 'S' => 1,
+                    _ => return Err(Error::InvalidDuration(format!("unknown unit '{c}'"))),
+                };
+                let num: u64 = current_num
+                    .parse()
+                    .map_err(|_| Error::InvalidDuration(format!("missing number before '{c}'")))?;
                 current_num.clear();
-                match c {
-                    'h' | 'H' => total_secs += num * 3600,
-                    'm' | 'M' => total_secs += num * 60,
-                    's' | 'S' => total_secs += num,
-                    _ => {}
-                }
+                total_secs = num
+                    .checked_mul(multiplier)
+                    .and_then(|secs| total_secs.checked_add(secs))
+                    .ok_or_else(|| invalid("duration (too large)"))?;
             }
         }
 
-        // If just a number, treat as seconds
-        if !current_num.is_empty() && total_secs == 0 {
-            total_secs = current_num.parse().unwrap_or(0);
+        // A trailing bare number counts as seconds ("90" or "5m30")
+        if !current_num.is_empty() {
+            let secs = current_num.parse::<u64>().map_err(|_| invalid("number"))?;
+            total_secs = total_secs.checked_add(secs).ok_or_else(|| invalid("duration (too large)"))?;
         }
 
         if total_secs == 0 {
-            return Err("Invalid duration".to_string());
+            return Err(Error::InvalidDuration("duration must be greater than zero".into()));
         }
 
         Ok(Self::from_secs(total_secs))
@@ -314,7 +329,8 @@ impl Countdown {
     /// Update the timer (call each frame)
     pub fn update(&mut self, dt: f32) {
         // Update blink state
-        self.blink_elapsed += Duration::from_secs_f32(dt);
+        let elapsed = super::dt_to_duration(dt);
+        self.blink_elapsed += elapsed;
         if self.blink_elapsed >= Duration::from_millis(500) {
             self.blink_elapsed = Duration::ZERO;
             self.blink = !self.blink;
@@ -324,7 +340,6 @@ impl Countdown {
             return;
         }
 
-        let elapsed = Duration::from_secs_f32(dt);
         if self.remaining > elapsed {
             self.remaining -= elapsed;
         } else {
@@ -442,17 +457,7 @@ impl Countdown {
         if let Some(ref title) = self.title {
             let title_y = offset_y + scaled_height + 1;
             if title_y < buf_height {
-                let title_x = buf_width.saturating_sub(title.len()) / 2;
-                for (i, ch) in title.chars().enumerate() {
-                    let x = title_x + i;
-                    if x < buf_width {
-                        // Plot title characters with medium luminance
-                        // We use a simple approach - just set luminance based on char
-                        if !ch.is_whitespace() {
-                            buffer.plot(x as u16, title_y as u16, 100.0, 0.5);
-                        }
-                    }
-                }
+                plot_text(buffer, title, title_y, 0.5);
             }
         }
 
@@ -466,15 +471,35 @@ impl Countdown {
         if let Some(status_text) = status {
             let status_y = offset_y + scaled_height + if self.title.is_some() { 3 } else { 1 };
             if status_y < buf_height {
-                let status_x = buf_width.saturating_sub(status_text.len()) / 2;
-                for (i, _) in status_text.chars().enumerate() {
-                    let x = status_x + i;
-                    if x < buf_width {
-                        buffer.plot(x as u16, status_y as u16, 100.0, 0.4);
-                    }
-                }
+                plot_text(buffer, status_text, status_y, 0.4);
             }
         }
+    }
+}
+
+/// Draw `text` centered on row `y` as literal characters
+fn plot_text(buffer: &mut AsciiBuffer, text: &str, y: usize, luminance: f32) {
+    let width = buffer.width as usize;
+    let start = width.saturating_sub(text.chars().count()) / 2;
+    for (i, ch) in text.chars().enumerate() {
+        let x = start + i;
+        if x < width && !ch.is_whitespace() {
+            buffer.plot_fragment(x as u16, y as u16, 100.0, Fragment::new(luminance).with_glyph(ch));
+        }
+    }
+}
+
+impl crate::scene::Scene for Countdown {
+    fn update(&mut self, dt: f32) {
+        Countdown::update(self, dt)
+    }
+
+    fn render(&self, _renderer: &Renderer, buffer: &mut AsciiBuffer) {
+        Countdown::render(self, buffer)
+    }
+
+    fn supports_pixels(&self) -> bool {
+        false // The digits and labels are drawn from text glyphs
     }
 }
 
@@ -498,6 +523,39 @@ mod tests {
 
         let c = Countdown::parse("1:30:00").unwrap();
         assert_eq!(c.remaining().as_secs(), 5400);
+
+        let c = Countdown::parse("5m30").unwrap();
+        assert_eq!(c.remaining().as_secs(), 330);
+
+        let c = Countdown::parse("1h 15m").unwrap();
+        assert_eq!(c.remaining().as_secs(), 4500);
+
+        assert!(Countdown::parse("1h5x").is_err());
+        assert!(Countdown::parse("m").is_err());
+        assert!(Countdown::parse("0s").is_err());
+        assert!(Countdown::parse("99999999999999999999h").is_err());
+    }
+
+    #[test]
+    fn test_status_text_is_readable() {
+        let mut c = Countdown::from_secs(10).with_title("Tea");
+        c.pause();
+        let mut buffer = AsciiBuffer::new(80, 24);
+        c.render(&mut buffer);
+        let text: String = (0..buffer.height)
+            .flat_map(|y| (0..buffer.width).map(move |x| (x, y)))
+            .filter_map(|(x, y)| buffer.get(x, y).and_then(|f| f.glyph))
+            .collect();
+        assert!(text.contains("Tea") && text.contains("PAUSED"), "{text}");
+    }
+
+    #[test]
+    fn test_update_ignores_invalid_dt() {
+        let mut c = Countdown::from_secs(10);
+        c.start();
+        c.update(-1.0);
+        c.update(f32::NAN);
+        assert_eq!(c.remaining().as_secs(), 10);
     }
 
     #[test]

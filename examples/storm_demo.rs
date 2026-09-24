@@ -25,7 +25,7 @@ const FRAME_DURATION: Duration = Duration::from_micros(1_000_000 / TARGET_FPS);
 fn rand() -> f32 {
     use std::cell::Cell;
     thread_local! {
-        static STATE: Cell<u32> = Cell::new(12345);
+        static STATE: Cell<u32> = const { Cell::new(12345) };
     }
     STATE.with(|s| {
         let mut x = s.get();

@@ -1,9 +1,11 @@
-//! GIF animation support for orb
+//! GIF animation support for zoa
 //!
 //! This module provides animated GIF playback as ASCII art.
 //! Frames are converted to ASCII at render time to adapt to terminal size.
 
-use crate::renderer::AsciiBuffer;
+use crate::error::{Error, Result};
+use crate::renderer::{AsciiBuffer, Fragment, Renderer};
+use ratatui::style::Color;
 use std::io::BufReader;
 use std::path::Path;
 use std::time::Duration;
@@ -29,30 +31,31 @@ pub struct AnimatedGif {
     pub used_chafa: bool,
     /// Zoom/scale factor (1.0 = fit to buffer, >1 = larger, <1 = smaller)
     scale: f32,
+    /// Use the GIF's own colors instead of the color palette
+    true_color: bool,
 }
 
 impl AnimatedGif {
     /// Load a GIF file
-    pub fn from_file(path: &Path) -> Result<Self, String> {
+    pub fn from_file(path: &Path) -> Result<Self> {
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Animation")
             .to_string();
 
-        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let file = std::fs::File::open(path)?;
         let reader = BufReader::new(file);
         let decoder =
-            image::codecs::gif::GifDecoder::new(reader).map_err(|e| e.to_string())?;
+            image::codecs::gif::GifDecoder::new(reader)?;
 
         use image::AnimationDecoder;
         let raw_frames: Vec<image::Frame> = decoder
             .into_frames()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         if raw_frames.is_empty() {
-            return Err("No frames in GIF".to_string());
+            return Err(Error::InvalidData("no frames in GIF".into()));
         }
 
         // Get dimensions from first frame
@@ -84,12 +87,19 @@ impl AnimatedGif {
             height,
             used_chafa: false,
             scale: 1.0,
+            true_color: false,
         })
     }
 
     /// Set zoom/scale factor (0.3 to 3.0)
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.clamp(0.3, 3.0);
+    }
+
+    /// Show the GIF's own colors instead of mapping brightness through the
+    /// color palette
+    pub fn set_true_color(&mut self, true_color: bool) {
+        self.true_color = true_color;
     }
 
     /// Get current scale factor
@@ -99,13 +109,16 @@ impl AnimatedGif {
 
     /// Update animation state
     pub fn update(&mut self, dt: f32) {
-        self.elapsed += Duration::from_secs_f32(dt);
+        self.elapsed += crate::shapes::dt_to_duration(dt);
 
-        if let Some(frame) = self.frames.get(self.current_frame) {
-            if self.elapsed >= frame.delay {
-                self.elapsed = Duration::ZERO;
-                self.current_frame = (self.current_frame + 1) % self.frames.len();
+        // Carry leftover time into the next frame (and skip frames on long
+        // updates) so playback speed matches the GIF's timing.
+        while let Some(frame) = self.frames.get(self.current_frame) {
+            if self.elapsed < frame.delay {
+                break;
             }
+            self.elapsed -= frame.delay;
+            self.current_frame = (self.current_frame + 1) % self.frames.len();
         }
     }
 
@@ -131,15 +144,16 @@ impl AnimatedGif {
             return;
         }
 
-        // Calculate scaling to fit buffer while maintaining aspect ratio
-        // Terminal chars are ~2x taller than wide, so we compensate
+        // Calculate scaling to fit buffer while maintaining aspect ratio,
+        // compensating for pixels that are taller than wide
+        let aspect = buffer.pixel_aspect;
         let scale_x = img_width as f32 / buf_width as f32;
-        let scale_y = (img_height as f32 / buf_height as f32) * 0.5;
+        let scale_y = (img_height as f32 / buf_height as f32) / aspect;
         // Apply user zoom: higher self.scale = larger output (divide base scale)
         let scale = (scale_x.max(scale_y) / self.scale).max(0.1);
 
         let out_width = ((img_width as f32 / scale) as usize).min(buf_width).max(1);
-        let out_height = ((img_height as f32 / scale * 0.5) as usize).min(buf_height).max(1);
+        let out_height = ((img_height as f32 / scale / aspect) as usize).min(buf_height).max(1);
 
         // Center in buffer
         let offset_x = buf_width.saturating_sub(out_width) / 2;
@@ -157,22 +171,42 @@ impl AnimatedGif {
                     break;
                 }
 
-                // Sample from source image
-                let src_x = ((x as f32 * scale) as u32).min(img.width() - 1);
-                let src_y = ((y as f32 * scale * 2.0) as u32).min(img.height() - 1);
+                // Average the source pixels this cell covers (box filter), so
+                // downscaling doesn't alias or drop thin details
+                let x0 = ((x as f32 * scale) as u32).min(img.width() - 1);
+                let y0 = ((y as f32 * scale * aspect) as u32).min(img.height() - 1);
+                let x1 = (((x + 1) as f32 * scale) as u32).clamp(x0 + 1, img.width());
+                let y1 = (((y + 1) as f32 * scale * aspect) as u32).clamp(y0 + 1, img.height());
+                // Cap the work per cell for very large GIFs
+                let step_x = ((x1 - x0) / 8).max(1) as usize;
+                let step_y = ((y1 - y0) / 8).max(1) as usize;
 
-                let pixel = img.get_pixel(src_x, src_y);
-                let [r, g, b, a] = pixel.0;
+                let (mut sum, mut alpha, mut count) = ([0.0f32; 3], 0.0f32, 0.0f32);
+                for sy in (y0..y1).step_by(step_y) {
+                    for sx in (x0..x1).step_by(step_x) {
+                        let [r, g, b, a] = img.get_pixel(sx, sy).0;
+                        let a = a as f32 / 255.0;
+                        sum[0] += r as f32 * a;
+                        sum[1] += g as f32 * a;
+                        sum[2] += b as f32 * a;
+                        alpha += a;
+                        count += 1.0;
+                    }
+                }
 
-                // Calculate luminance (weighted RGB)
-                let lum = if a < 128 {
-                    0.0 // Transparent -> space
-                } else {
-                    (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0
-                };
+                // Mostly transparent -> leave the cell empty
+                if alpha < count * 0.5 {
+                    continue;
+                }
+                let [r, g, b] = sum.map(|c| c / alpha);
+                let lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
 
+                let mut fragment = Fragment::new(lum);
+                if self.true_color {
+                    fragment = fragment.with_color(Color::Rgb(r as u8, g as u8, b as u8));
+                }
                 // Use high depth so GIF is always visible
-                buffer.plot(buf_x as u16, buf_y as u16, 100.0, lum);
+                buffer.plot_fragment(buf_x as u16, buf_y as u16, 100.0, fragment);
             }
         }
     }
@@ -180,6 +214,16 @@ impl AnimatedGif {
     /// Get frame count
     pub fn frame_count(&self) -> usize {
         self.frames.len()
+    }
+}
+
+impl crate::scene::Scene for AnimatedGif {
+    fn update(&mut self, dt: f32) {
+        AnimatedGif::update(self, dt)
+    }
+
+    fn render(&self, _renderer: &Renderer, buffer: &mut AsciiBuffer) {
+        AnimatedGif::render(self, buffer)
     }
 }
 
@@ -216,6 +260,39 @@ mod tests {
             assert!(out_w > buf_w / 4, "Output too small horizontally");
             assert!(out_h > buf_h / 4, "Output too small vertically");
         }
+    }
+
+    #[test]
+    fn test_frame_timing_carries_remainder() {
+        let frame = |ms| GifFrame {
+            image: image::RgbaImage::new(1, 1),
+            delay: Duration::from_millis(ms),
+        };
+        let mut gif = AnimatedGif {
+            frames: vec![frame(100), frame(100), frame(100)],
+            current_frame: 0,
+            elapsed: Duration::ZERO,
+            name: String::new(),
+            width: 1,
+            height: 1,
+            used_chafa: false,
+            scale: 1.0,
+            true_color: false,
+        };
+
+        // Three 60ms ticks = 180ms: one frame advanced, 80ms carried over
+        for _ in 0..3 {
+            gif.update(0.06);
+        }
+        assert_eq!(gif.current_frame, 1);
+
+        // A long stall skips ahead instead of advancing a single frame
+        gif.update(0.25);
+        assert_eq!(gif.current_frame, 1); // 80+250ms: advances through 2, 0, then 1
+
+        // Invalid deltas are ignored rather than panicking
+        gif.update(-1.0);
+        gif.update(f32::NAN);
     }
 
     #[test]
