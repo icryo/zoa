@@ -17,4 +17,11 @@ pub trait Scene {
 
     /// Manually rotate the scene, if it supports rotation.
     fn rotate(&mut self, _dx: f32, _dy: f32) {}
+
+    /// Whether the scene can be rendered at sub-cell resolution
+    /// (see [`PixelMode`](crate::PixelMode)). Scenes that draw text glyphs
+    /// should return `false` to always get one pixel per cell.
+    fn supports_pixels(&self) -> bool {
+        true
+    }
 }

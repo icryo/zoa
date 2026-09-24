@@ -10,6 +10,9 @@ A 3D ASCII renderer for terminals, built on [ratatui](https://github.com/ratatui
 - **Animated GIFs** - Render GIFs as ASCII art
 - **Countdown Timer** - Large ASCII digit display
 - **Multiple Styles** - ASCII, blocks, braille, hatching characters
+- **Sub-cell Pixels** - Half-block, quadrant, sextant, octant and braille modes pack
+  several two-color pixels into each character cell; plain Unicode text, no
+  terminal graphics protocol needed
 - **Color Palettes** - Cyan, fire, matrix, purple, rainbow, grayscale
 
 ## Installation
@@ -64,6 +67,33 @@ let config = ZoaConfig {
 
 let mut widget = ZoaWidget::new(config);
 ```
+
+## Pixel Modes
+
+By default each cell shows one pixel as a character from the `CharStyle` ramp.
+`PixelMode` packs more pixels into each cell, using foreground and background
+colors:
+
+| Mode | Pixels per cell | Support |
+|------|-----------------|---------|
+| `Cell` | 1 (character ramp) | Everywhere |
+| `HalfBlock` | 1x2 | Everywhere |
+| `Quadrant` | 2x2 | Nearly everywhere |
+| `Sextant` | 2x3 | Fonts with Unicode 13 "legacy computing" symbols |
+| `Octant` | 2x4 | Fonts with Unicode 16 octants |
+| `Braille` | 2x4 dots, one color | Wherever braille renders |
+
+```rust
+use zoa::{PixelMode, ZoaConfig, ZoaWidget};
+
+let widget = ZoaWidget::new(ZoaConfig {
+    pixel_mode: PixelMode::HalfBlock,
+    ..Default::default()
+});
+```
+
+In `Cell` mode, `ZoaConfig::dither` enables ordered dithering between ramp
+characters to smooth gradients.
 
 ## Any Scene in the Widget
 
@@ -124,6 +154,8 @@ zoa --timer
 | `s` | Cycle shapes |
 | `c` | Cycle character styles |
 | `p` | Cycle color palettes |
+| `p` | Cycle pixel modes |
+| `d` | Toggle dithering |
 | `m` | Toggle wireframe/solid |
 | `+`/`-` | Zoom in/out |
 | `[`/`]` | Adjust speed |

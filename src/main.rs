@@ -19,7 +19,7 @@ use ratatui::{
 };
 use tachyonfx::{fx, Effect, Interpolation, Shader};
 
-use zoa::{AsciiBuffer, AnimatedGif, CharStyle, ColorPalette, Countdown, Cube, Mesh, RenderMode, Renderer, Sphere, Torus, Vec3};
+use zoa::{AsciiBuffer, AnimatedGif, CharStyle, ColorPalette, Countdown, Cube, Mesh, PixelMode, RenderMode, Renderer, Sphere, Torus, Vec3, CHAR_ASPECT};
 
 const TARGET_FPS: u64 = 60;
 const FRAME_DURATION: Duration = Duration::from_micros(1_000_000 / TARGET_FPS);
@@ -158,6 +158,8 @@ struct App {
     palette: ColorPalette,
     char_style: CharStyle,
     render_mode: RenderMode,
+    pixel_mode: PixelMode,
+    dither: bool,
     rotation_mode: RotationMode,
     speed: f32,
     detail: usize,
@@ -191,6 +193,8 @@ impl App {
             palette: ColorPalette::default(),
             char_style: CharStyle::default(),
             render_mode: RenderMode::default(),
+            pixel_mode: PixelMode::default(),
+            dither: false,
             rotation_mode: RotationMode::default(),
             speed: DEFAULT_SPEED,
             detail: DEFAULT_DENSITY,
@@ -407,8 +411,21 @@ impl App {
         }
     }
 
+    /// Pixel mode for the current shape (the countdown is drawn from text,
+    /// so it always uses one pixel per cell)
+    fn effective_pixel_mode(&self) -> PixelMode {
+        if self.current_shape == ShapeType::Countdown {
+            PixelMode::Cell
+        } else {
+            self.pixel_mode
+        }
+    }
+
     fn render_3d(&mut self, area: Rect) {
-        self.ascii_buffer.resize(area.width, area.height);
+        let mode = self.effective_pixel_mode();
+        let (sx, sy) = mode.subdivisions();
+        self.ascii_buffer.resize(area.width.saturating_mul(sx), area.height.saturating_mul(sy));
+        self.ascii_buffer.pixel_aspect = mode.pixel_aspect(CHAR_ASPECT);
         self.ascii_buffer.clear();
         self.renderer.mode = self.render_mode;
 
@@ -489,6 +506,16 @@ impl App {
             }
 
             // Wireframe toggle
+            // Cycle pixel mode: Cell → HalfBlock → Quadrant → ... → Braille
+            KeyCode::Char('p') => {
+                self.pixel_mode = self.pixel_mode.next();
+            }
+
+            // Toggle ordered dithering (Cell mode)
+            KeyCode::Char('d') => {
+                self.dither = !self.dither;
+            }
+
             KeyCode::Char('w') => {
                 self.render_mode = self.render_mode.next();
                 self.transition_effect = Some(fx::dissolve((300, Interpolation::QuadOut)));
@@ -571,11 +598,14 @@ struct AsciiWidget<'a> {
     buffer: &'a AsciiBuffer,
     palette: ColorPalette,
     char_style: CharStyle,
+    pixel_mode: PixelMode,
+    dither: bool,
 }
 
 impl<'a> Widget for AsciiWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        self.buffer.draw(area, buf, self.char_style, self.palette);
+        self.buffer
+            .draw_pixels(area, buf, self.pixel_mode, self.char_style, self.palette, self.dither);
     }
 }
 
@@ -855,6 +885,8 @@ fn run_monitor(mut terminal: DefaultTerminal, mut app: App, command: &str) -> Re
                 buffer: &app.ascii_buffer,
                 palette: app.palette,
                 char_style: app.char_style,
+                pixel_mode: app.effective_pixel_mode(),
+                dither: app.dither,
             };
             frame.render_widget(widget, area);
 
@@ -925,6 +957,8 @@ fn run_interactive(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
                 buffer: &app.ascii_buffer,
                 palette: app.palette,
                 char_style: app.char_style,
+                pixel_mode: app.effective_pixel_mode(),
+                dither: app.dither,
             };
             frame.render_widget(widget, area);
 
@@ -1045,6 +1079,8 @@ fn run_timer_mode(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
                     buffer: &app.ascii_buffer,
                     palette,
                     char_style: app.char_style,
+                    pixel_mode: PixelMode::Cell,
+                    dither: false,
                 };
                 frame.render_widget(countdown_widget, countdown_area);
 
@@ -1059,6 +1095,8 @@ fn run_timer_mode(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
                     buffer: &gif_buffer,
                     palette: ColorPalette::Cyan,
                     char_style: CharStyle::Braille,
+                    pixel_mode: PixelMode::Cell,
+                    dither: false,
                 };
                 frame.render_widget(gif_widget, gif_area);
             } else {
@@ -1073,6 +1111,8 @@ fn run_timer_mode(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
                     buffer: &app.ascii_buffer,
                     palette,
                     char_style: app.char_style,
+                    pixel_mode: PixelMode::Cell,
+                    dither: false,
                 };
                 frame.render_widget(widget, area);
             }
@@ -1103,8 +1143,9 @@ fn draw_help(frame: &mut Frame, app: &App) {
 
     // Title bar - simplified
     let title = format!(
-        " {} | {} | {} | {} | {} ",
+        " {} | {} | {} | {} | {} | {} ",
         app.shape_name(),
+        app.effective_pixel_mode().name(),
         app.char_style.name(),
         app.palette.name(),
         app.render_mode.name(),
@@ -1119,7 +1160,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
     }
 
     // Help text - compact
-    let help = " [Space] Shape | [S]tyle | [C]olor | [W]ire | [M]ode | [IJKL] Rotate | [↑↓] Zoom | [←→] Speed | [+/-] Detail | [R]eset | [H]ide | [Q]uit ";
+    let help = " [Space] Shape | [P]ixels | [S]tyle | [D]ither | [C]olor | [W]ire | [M]ode | [IJKL] Rotate | [↑↓] Zoom | [←→] Speed | [+/-] Detail | [R]eset | [H]ide | [Q]uit ";
     let help_widget = Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);

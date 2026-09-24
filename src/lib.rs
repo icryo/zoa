@@ -54,7 +54,7 @@ pub mod widget;
 
 // Re-export main types for convenience
 pub use error::{Error, Result};
-pub use renderer::{AsciiBuffer, Camera, CharStyle, ColorPalette, Fragment, Mat3, RenderMode, Renderer, Vec3};
+pub use renderer::{AsciiBuffer, Camera, CharStyle, ColorPalette, Fragment, Mat3, PixelMode, RenderMode, Renderer, Vec3, CHAR_ASPECT};
 pub use scene::Scene;
 #[cfg(feature = "gif")]
 pub use shapes::AnimatedGif;

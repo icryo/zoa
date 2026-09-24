@@ -15,7 +15,7 @@
 use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 
 use crate::error::Result;
-use crate::renderer::{AsciiBuffer, CharStyle, ColorPalette, RenderMode, Renderer};
+use crate::renderer::{AsciiBuffer, CharStyle, ColorPalette, PixelMode, RenderMode, Renderer, CHAR_ASPECT};
 use crate::scene::Scene;
 #[cfg(feature = "gif")]
 use crate::shapes::AnimatedGif;
@@ -55,6 +55,12 @@ pub struct ZoaConfig {
     pub auto_rotate: bool,
     /// Show GIFs in their own colors instead of the palette
     pub true_color: bool,
+    /// How cells display pixels: one character per cell (`Cell`, using
+    /// `char_style`) or several block/braille pixels per cell
+    pub pixel_mode: PixelMode,
+    /// Ordered dithering between `char_style` characters in `Cell` mode,
+    /// to smooth out banding in gradients
+    pub dither: bool,
 }
 
 impl Default for ZoaConfig {
@@ -69,6 +75,8 @@ impl Default for ZoaConfig {
             zoom: 1.0,
             auto_rotate: true,
             true_color: false,
+            pixel_mode: PixelMode::default(),
+            dither: false,
         }
     }
 }
@@ -176,6 +184,11 @@ impl ZoaWidget {
     /// Set the character style
     pub fn set_char_style(&mut self, style: CharStyle) {
         self.config.char_style = style;
+    }
+
+    /// Set how cells display pixels (see [`PixelMode`])
+    pub fn set_pixel_mode(&mut self, mode: PixelMode) {
+        self.config.pixel_mode = mode;
     }
 
     /// Set the color palette
@@ -357,10 +370,23 @@ impl ZoaWidget {
         }
     }
 
+    /// The pixel mode actually used for the current content
+    fn effective_pixel_mode(&self) -> PixelMode {
+        if self.active_scene().supports_pixels() {
+            self.config.pixel_mode
+        } else {
+            PixelMode::Cell
+        }
+    }
+
     fn render_to_buffer(&mut self, width: u16, height: u16) {
+        let mode = self.effective_pixel_mode();
+        let (sx, sy) = mode.subdivisions();
+
         // Move the buffer out so the scene can be borrowed alongside it
         let mut buffer = std::mem::replace(&mut self.buffer, AsciiBuffer::new(0, 0));
-        buffer.resize(width, height);
+        buffer.resize(width.saturating_mul(sx), height.saturating_mul(sy));
+        buffer.pixel_aspect = mode.pixel_aspect(CHAR_ASPECT);
         buffer.clear();
         self.active_scene().render(&self.renderer, &mut buffer);
         self.buffer = buffer;
@@ -370,7 +396,9 @@ impl ZoaWidget {
 impl Widget for &mut ZoaWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
         self.render_to_buffer(area.width, area.height);
-        self.buffer.draw(area, buf, self.config.char_style, self.config.palette);
+        let ZoaConfig { char_style, palette, dither, .. } = self.config;
+        let mode = self.effective_pixel_mode();
+        self.buffer.draw_pixels(area, buf, mode, char_style, palette, dither);
     }
 }
 
@@ -438,6 +466,17 @@ mod tests {
             widget.render_to_buffer(1, 2);
             widget.render_to_buffer(3, 3);
         }
+
+        // Every pixel mode, including tiny areas
+        for mode in [PixelMode::HalfBlock, PixelMode::Quadrant, PixelMode::Sextant, PixelMode::Octant, PixelMode::Braille] {
+            widget.set_pixel_mode(mode);
+            for (w, h) in [(0, 0), (1, 1), (3, 2), (80, 24)] {
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                (&mut widget).render(area, &mut buf);
+            }
+        }
+        widget.set_pixel_mode(PixelMode::Cell);
 
         // Test countdown at tiny sizes
         widget.start_countdown_from_str("1:00").unwrap();

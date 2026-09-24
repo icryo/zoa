@@ -167,35 +167,36 @@ impl Default for Camera {
 }
 
 impl Camera {
-    /// Rows per world unit at depth 1 for a render area of this size.
-    pub fn pixels_per_unit(&self, screen_width: u16, screen_height: u16) -> f32 {
-        let fit = (screen_height as f32).min(screen_width as f32 / CHAR_ASPECT);
+    /// Rows per world unit at depth 1 for a render area of this size, whose
+    /// pixels are `pixel_aspect` times taller than wide.
+    pub fn pixels_per_unit(&self, screen_width: u16, screen_height: u16, pixel_aspect: f32) -> f32 {
+        let fit = (screen_height as f32).min(screen_width as f32 / pixel_aspect);
         self.scale * FIT * fit
     }
 
     /// Project to continuous screen coordinates (cell `(x, y)` spans
     /// `[x, x + 1) x [y, y + 1)`), without clipping to the screen.
     /// Returns `(x, y, 1/z)`, or `None` if the point is behind the near plane.
-    pub fn project_f(&self, point: Vec3, screen_width: u16, screen_height: u16) -> Option<(f32, f32, f32)> {
+    pub fn project_f(&self, point: Vec3, screen_width: u16, screen_height: u16, pixel_aspect: f32) -> Option<(f32, f32, f32)> {
         let z = self.distance + point.z;
         if z <= 0.1 {
             return None;
         }
         let inv_z = 1.0 / z;
-        let ppu = self.pixels_per_unit(screen_width, screen_height) * inv_z;
+        let ppu = self.pixels_per_unit(screen_width, screen_height, pixel_aspect) * inv_z;
         Some((
-            screen_width as f32 / 2.0 + point.x * ppu * CHAR_ASPECT,
+            screen_width as f32 / 2.0 + point.x * ppu * pixel_aspect,
             screen_height as f32 / 2.0 - point.y * ppu,
             inv_z,
         ))
     }
 
     /// Project to the screen cell containing `point`, if it is visible.
-    pub fn project(&self, point: Vec3, screen_width: u16, screen_height: u16) -> Option<(u16, u16, f32)> {
+    pub fn project(&self, point: Vec3, screen_width: u16, screen_height: u16, pixel_aspect: f32) -> Option<(u16, u16, f32)> {
         if screen_width == 0 || screen_height == 0 {
             return None;
         }
-        let (x, y, inv_z) = self.project_f(point, screen_width, screen_height)?;
+        let (x, y, inv_z) = self.project_f(point, screen_width, screen_height, pixel_aspect)?;
         if x >= 0.0 && x < screen_width as f32 && y >= 0.0 && y < screen_height as f32 {
             Some((x as u16, y as u16, inv_z))
         } else {
@@ -225,14 +226,14 @@ mod tests {
     fn projection_keeps_proportions_and_scales_with_area() {
         let cam = Camera::default();
         for (w, h) in [(80, 24), (40, 40), (200, 60)] {
-            let (cx, cy, _) = cam.project_f(Vec3::ZERO, w, h).unwrap();
-            let (x, _, _) = cam.project_f(Vec3::new(1.0, 0.0, 0.0), w, h).unwrap();
-            let (_, y, _) = cam.project_f(Vec3::new(0.0, 1.0, 0.0), w, h).unwrap();
+            let (cx, cy, _) = cam.project_f(Vec3::ZERO, w, h, CHAR_ASPECT).unwrap();
+            let (x, _, _) = cam.project_f(Vec3::new(1.0, 0.0, 0.0), w, h, CHAR_ASPECT).unwrap();
+            let (_, y, _) = cam.project_f(Vec3::new(0.0, 1.0, 0.0), w, h, CHAR_ASPECT).unwrap();
             // One unit spans twice as many columns as rows
             assert!(((x - cx) - 2.0 * (cy - y)).abs() < 1e-3);
         }
-        let small = cam.pixels_per_unit(80, 24);
-        let large = cam.pixels_per_unit(200, 60);
+        let small = cam.pixels_per_unit(80, 24, CHAR_ASPECT);
+        let large = cam.pixels_per_unit(200, 60, CHAR_ASPECT);
         assert!(large > 2.0 * small);
     }
 }

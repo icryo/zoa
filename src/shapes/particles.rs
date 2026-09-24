@@ -1,4 +1,4 @@
-use crate::renderer::{AsciiBuffer, Renderer, Vec3, CHAR_ASPECT};
+use crate::renderer::{AsciiBuffer, Renderer, Vec3};
 
 /// A single particle with position, velocity, and lifetime
 #[derive(Clone)]
@@ -365,14 +365,15 @@ impl ParticleSystem {
             return;
         }
 
-        // Rows per world unit; columns are twice as dense to keep proportions
-        let scale = buf_height.min(buf_width / CHAR_ASPECT) * 0.15 * zoom;
+        // Rows per world unit; columns scaled by the pixel shape to keep proportions
+        let aspect = buffer.pixel_aspect;
+        let scale = buf_height.min(buf_width / aspect) * 0.15 * zoom;
         let center_x = buf_width / 2.0;
         let center_y = buf_height / 2.0;
 
         for particle in &self.particles {
             // Simple orthographic projection
-            let screen_x = center_x + particle.x * scale * CHAR_ASPECT;
+            let screen_x = center_x + particle.x * scale * aspect;
             let screen_y = center_y - particle.y * scale; // flip Y
 
             if screen_x >= 0.0 && screen_x < buf_width && screen_y >= 0.0 && screen_y < buf_height {

@@ -497,6 +497,10 @@ impl crate::scene::Scene for Countdown {
     fn render(&self, _renderer: &Renderer, buffer: &mut AsciiBuffer) {
         Countdown::render(self, buffer)
     }
+
+    fn supports_pixels(&self) -> bool {
+        false // The digits and labels are drawn from text glyphs
+    }
 }
 
 #[cfg(test)]

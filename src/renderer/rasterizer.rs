@@ -1,8 +1,9 @@
-use super::math::{Camera, Vec3};
+use super::math::{Camera, Vec3, CHAR_ASPECT};
+use super::pixels::{self, PixelMode};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::Color,
 };
 
 /// Render mode: solid fill or wireframe edges
@@ -93,6 +94,16 @@ impl CharStyle {
     pub fn to_char(self, luminance: f32) -> char {
         let chars = self.chars();
         let idx = ((luminance.clamp(0.0, 1.0)) * (chars.len() - 1) as f32) as usize;
+        chars[idx.min(chars.len() - 1)]
+    }
+
+    /// Like `to_char`, but rounds between neighbouring ramp characters using
+    /// `threshold` in `[0, 1)` (e.g. an ordered-dither matrix value), so
+    /// smooth gradients don't collapse into flat bands.
+    pub fn to_char_dithered(self, luminance: f32, threshold: f32) -> char {
+        let chars = self.chars();
+        let level = luminance.clamp(0.0, 1.0) * (chars.len() - 1) as f32;
+        let idx = (level + threshold - 0.5).round().max(0.0) as usize;
         chars[idx.min(chars.len() - 1)]
     }
 }
@@ -240,6 +251,9 @@ impl Fragment {
 pub struct AsciiBuffer {
     pub width: u16,
     pub height: u16,
+    /// Height/width ratio of one buffer pixel (2.0 when a pixel is a whole
+    /// terminal cell; see `PixelMode::pixel_aspect`)
+    pub pixel_aspect: f32,
     buffer: Vec<Option<Fragment>>,
     z_buffer: Vec<f32>,
 }
@@ -250,6 +264,7 @@ impl AsciiBuffer {
         Self {
             width,
             height,
+            pixel_aspect: CHAR_ASPECT,
             buffer: vec![None; size],
             z_buffer: vec![f32::NEG_INFINITY; size],
         }
@@ -297,19 +312,27 @@ impl AsciiBuffer {
         }
     }
 
-    /// Draw the buffer into a ratatui `Buffer` at `area`, leaving empty
-    /// cells untouched.
+    /// Draw the buffer (one pixel per cell) into a ratatui `Buffer` at
+    /// `area`, leaving empty cells untouched.
     pub fn draw(&self, area: Rect, buf: &mut Buffer, style: CharStyle, palette: ColorPalette) {
-        let area = area.intersection(buf.area);
-        for y in 0..area.height.min(self.height) {
-            for x in 0..area.width.min(self.width) {
-                if let Some(fragment) = self.get(x, y) {
-                    let (ch, color) = fragment.resolve(style, palette);
-                    buf[(area.x + x, area.y + y)]
-                        .set_char(ch)
-                        .set_style(Style::default().fg(color));
-                }
-            }
+        pixels::draw_cells(self, area, buf, style, palette, false);
+    }
+
+    /// Draw a buffer rendered at `mode.subdivisions()` pixels per cell.
+    /// In `PixelMode::Cell`, `style` picks the characters, optionally with
+    /// ordered dithering; other modes pick glyphs from the pixel pattern.
+    pub fn draw_pixels(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        mode: PixelMode,
+        style: CharStyle,
+        palette: ColorPalette,
+        dither: bool,
+    ) {
+        match mode {
+            PixelMode::Cell => pixels::draw_cells(self, area, buf, style, palette, dither),
+            _ => pixels::draw_pixels(self, area, buf, mode, palette),
         }
     }
 }
@@ -320,6 +343,12 @@ pub struct Renderer {
     /// Minimum brightness of surfaces facing away from the light, so they
     /// still show up instead of vanishing into blank cells
     pub ambient: f32,
+    /// Strength of the specular (shiny) highlight, 0 to disable
+    pub specular: f32,
+    /// Tightness of the specular highlight; higher = smaller, sharper
+    pub shininess: f32,
+    /// How much surfaces darken toward the back of the scene, 0 to disable
+    pub fog: f32,
     pub mode: RenderMode,
 }
 
@@ -329,6 +358,9 @@ impl Default for Renderer {
             camera: Camera::default(),
             light_dir: Vec3::new(0.0, 1.0, -1.0).normalize(),
             ambient: 0.15,
+            specular: 0.4,
+            shininess: 32.0,
+            fog: 0.35,
             mode: RenderMode::default(),
         }
     }
@@ -338,14 +370,31 @@ impl Default for Renderer {
 const EDGE_EPSILON: f32 = 1e-4;
 
 impl Renderer {
-    /// Lambertian brightness plus ambient for a (unit) surface normal
-    pub fn shade(&self, normal: Vec3) -> f32 {
-        self.ambient + (1.0 - self.ambient) * normal.dot(self.light_dir).max(0.0)
+    /// Brightness of a surface with unit `normal` at depth `inv_z` (as
+    /// returned by the camera): ambient + diffuse + specular, dimmed by fog.
+    pub fn shade(&self, normal: Vec3, inv_z: f32) -> f32 {
+        let diffuse = normal.dot(self.light_dir).max(0.0);
+        // Leave headroom so the highlight doesn't blow out whole lit areas
+        let diffuse_weight = (1.0 - self.ambient) * (1.0 - 0.5 * self.specular);
+        let mut lum = self.ambient + diffuse_weight * diffuse;
+
+        if self.specular > 0.0 && diffuse > 0.0 {
+            // Blinn-Phong with the viewer looking down +z
+            let half = (self.light_dir + Vec3::new(0.0, 0.0, -1.0)).normalize();
+            lum += self.specular * normal.dot(half).max(0.0).powf(self.shininess);
+        }
+
+        if self.fog > 0.0 && inv_z > 0.0 {
+            // 0 at the front of a radius-3 scene around the origin, 1 at the back
+            let t = ((1.0 / inv_z - self.camera.distance) / 6.0 + 0.5).clamp(0.0, 1.0);
+            lum *= 1.0 - self.fog * t;
+        }
+        lum.min(1.0)
     }
 
     pub fn render_point(&self, buffer: &mut AsciiBuffer, position: Vec3, normal: Vec3) {
-        if let Some((sx, sy, depth)) = self.camera.project(position, buffer.width, buffer.height) {
-            buffer.plot(sx, sy, depth, self.shade(normal));
+        if let Some((sx, sy, depth)) = self.camera.project(position, buffer.width, buffer.height, buffer.pixel_aspect) {
+            buffer.plot(sx, sy, depth, self.shade(normal, depth));
         }
     }
 
@@ -359,7 +408,8 @@ impl Renderer {
         if w == 0 || h == 0 {
             return;
         }
-        let project = |p| self.camera.project_f(p, w, h);
+        let aspect = buffer.pixel_aspect;
+        let project = |p| self.camera.project_f(p, w, h, aspect);
         let (Some(a), Some(b), Some(c)) = (project(positions[0]), project(positions[1]), project(positions[2])) else {
             return;
         };
@@ -380,8 +430,14 @@ impl Renderer {
         let max_y = (a.1.max(b.1).max(c.1) - 0.5).floor().min(h as f32 - 1.0);
 
         if min_x > max_x || min_y > max_y {
-            // Smaller than a cell: draw it as a point so fine detail
-            // (e.g. dense meshes) doesn't vanish.
+            // Smaller than a pixel in both directions: draw it as a point so
+            // fine detail (e.g. dense meshes) doesn't vanish. Thin slivers
+            // (edge-on triangles) are skipped; their neighbours cover them.
+            let span_x = a.0.max(b.0).max(c.0) - a.0.min(b.0).min(c.0);
+            let span_y = a.1.max(b.1).max(c.1) - a.1.min(b.1).min(c.1);
+            if span_x > 1.0 || span_y > 1.0 {
+                return;
+            }
             let centroid = (positions[0] + positions[1] + positions[2]) * (1.0 / 3.0);
             let normal = (normals[0] + normals[1] + normals[2]).normalize();
             self.render_point(buffer, centroid, normal);
@@ -401,7 +457,7 @@ impl Renderer {
                 // 1/z is linear in screen space, so this depth is exact
                 let depth = a.2 * w0 + b.2 * w1 + c.2 * w2;
                 let normal = (normals[0] * w0 + normals[1] * w1 + normals[2] * w2).normalize();
-                buffer.plot(x, y, depth, self.shade(normal));
+                buffer.plot(x, y, depth, self.shade(normal, depth));
             }
         }
     }
@@ -412,7 +468,8 @@ impl Renderer {
         if w == 0 || h == 0 {
             return;
         }
-        let (Some(a), Some(b)) = (self.camera.project_f(from, w, h), self.camera.project_f(to, w, h)) else {
+        let aspect = buffer.pixel_aspect;
+        let (Some(a), Some(b)) = (self.camera.project_f(from, w, h, aspect), self.camera.project_f(to, w, h, aspect)) else {
             return;
         };
         // One step per cell along the longer axis, capped for off-screen lines
@@ -426,7 +483,7 @@ impl Renderer {
             }
             let depth = a.2 + (b.2 - a.2) * t;
             let normal = (from_normal * (1.0 - t) + to_normal * t).normalize();
-            buffer.plot(x as u16, y as u16, depth, self.shade(normal));
+            buffer.plot(x as u16, y as u16, depth, self.shade(normal, depth));
         }
     }
 }
@@ -457,8 +514,8 @@ mod tests {
         renderer.draw_triangle(&mut buffer, [p0, p2, p3], [n; 3]);
 
         // The square must be filled solid between its projected corners
-        let (x0, y0, _) = renderer.camera.project_f(p3, 80, 40).unwrap();
-        let (x1, y1, _) = renderer.camera.project_f(p1, 80, 40).unwrap();
+        let (x0, y0, _) = renderer.camera.project_f(p3, 80, 40, CHAR_ASPECT).unwrap();
+        let (x1, y1, _) = renderer.camera.project_f(p1, 80, 40, CHAR_ASPECT).unwrap();
         for y in (y0.ceil() as u16)..(y1.floor() as u16) {
             for x in (x0.ceil() as u16)..(x1.floor() as u16) {
                 assert!(buffer.get(x, y).is_some(), "gap at ({x}, {y})");
@@ -468,7 +525,8 @@ mod tests {
 
     #[test]
     fn nearer_triangle_wins() {
-        let renderer = Renderer::default();
+        // Plain diffuse lighting, so luminance tells the two triangles apart
+        let renderer = Renderer { specular: 0.0, fog: 0.0, ..Renderer::default() };
         let mut buffer = AsciiBuffer::new(40, 20);
         let tri = |z: f32| [Vec3::new(-2.0, -2.0, z), Vec3::new(2.0, -2.0, z), Vec3::new(0.0, 2.0, z)];
         let lit = Vec3::new(0.0, 1.0, -1.0).normalize();
@@ -476,6 +534,29 @@ mod tests {
         renderer.draw_triangle(&mut buffer, tri(-1.0), [lit; 3]);
         renderer.draw_triangle(&mut buffer, tri(1.0), [dark; 3]);
         assert!(buffer.get(20, 10).unwrap().luminance > 0.9);
+    }
+
+    #[test]
+    fn highlight_and_fog() {
+        let renderer = Renderer::default();
+        let facing_light = renderer.light_dir;
+        let half = (renderer.light_dir + Vec3::new(0.0, 0.0, -1.0)).normalize();
+        let depth = 1.0 / renderer.camera.distance;
+        // The specular peak is brighter than plain diffuse lighting
+        assert!(renderer.shade(half, depth) > renderer.shade(facing_light, depth));
+        // The same surface is dimmer further back
+        let near = 1.0 / (renderer.camera.distance - 2.0);
+        let far = 1.0 / (renderer.camera.distance + 2.0);
+        assert!(renderer.shade(facing_light, near) > renderer.shade(facing_light, far));
+    }
+
+    #[test]
+    fn dithering_mixes_neighbouring_levels() {
+        let style = CharStyle::Minimal; // 7 characters
+        let level = 2.5 / 6.0; // halfway between chars[2] and chars[3]
+        let chars: std::collections::HashSet<char> =
+            (0..16).map(|i| style.to_char_dithered(level, (i as f32 + 0.5) / 16.0)).collect();
+        assert_eq!(chars, [style.chars()[2], style.chars()[3]].into_iter().collect());
     }
 
     #[test]

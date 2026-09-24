@@ -144,15 +144,16 @@ impl AnimatedGif {
             return;
         }
 
-        // Calculate scaling to fit buffer while maintaining aspect ratio
-        // Terminal chars are ~2x taller than wide, so we compensate
+        // Calculate scaling to fit buffer while maintaining aspect ratio,
+        // compensating for pixels that are taller than wide
+        let aspect = buffer.pixel_aspect;
         let scale_x = img_width as f32 / buf_width as f32;
-        let scale_y = (img_height as f32 / buf_height as f32) * 0.5;
+        let scale_y = (img_height as f32 / buf_height as f32) / aspect;
         // Apply user zoom: higher self.scale = larger output (divide base scale)
         let scale = (scale_x.max(scale_y) / self.scale).max(0.1);
 
         let out_width = ((img_width as f32 / scale) as usize).min(buf_width).max(1);
-        let out_height = ((img_height as f32 / scale * 0.5) as usize).min(buf_height).max(1);
+        let out_height = ((img_height as f32 / scale / aspect) as usize).min(buf_height).max(1);
 
         // Center in buffer
         let offset_x = buf_width.saturating_sub(out_width) / 2;
@@ -173,9 +174,9 @@ impl AnimatedGif {
                 // Average the source pixels this cell covers (box filter), so
                 // downscaling doesn't alias or drop thin details
                 let x0 = ((x as f32 * scale) as u32).min(img.width() - 1);
-                let y0 = ((y as f32 * scale * 2.0) as u32).min(img.height() - 1);
+                let y0 = ((y as f32 * scale * aspect) as u32).min(img.height() - 1);
                 let x1 = (((x + 1) as f32 * scale) as u32).clamp(x0 + 1, img.width());
-                let y1 = (((y + 1) as f32 * scale * 2.0) as u32).clamp(y0 + 1, img.height());
+                let y1 = (((y + 1) as f32 * scale * aspect) as u32).clamp(y0 + 1, img.height());
                 // Cap the work per cell for very large GIFs
                 let step_x = ((x1 - x0) / 8).max(1) as usize;
                 let step_y = ((y1 - y0) / 8).max(1) as usize;

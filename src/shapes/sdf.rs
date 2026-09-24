@@ -3,7 +3,7 @@
 //! SDFs define shapes mathematically - the distance from any point to the surface.
 //! Ray marching steps through space using these distances to find surfaces.
 
-use crate::renderer::{AsciiBuffer, Renderer, Vec3, CHAR_ASPECT};
+use crate::renderer::{AsciiBuffer, Renderer, Vec3};
 
 /// Preset SDF scenes
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -273,7 +273,7 @@ impl SdfScene {
             return;
         }
 
-        let aspect = width / height / CHAR_ASPECT;
+        let aspect = width / height / buffer.pixel_aspect;
         let light_dir = Vec3::new(0.5, 1.0, -0.5).normalize();
 
         for y in 0..buffer.height {
