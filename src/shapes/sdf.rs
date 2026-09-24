@@ -3,7 +3,7 @@
 //! SDFs define shapes mathematically - the distance from any point to the surface.
 //! Ray marching steps through space using these distances to find surfaces.
 
-use crate::renderer::AsciiBuffer;
+use crate::renderer::{AsciiBuffer, Renderer, Vec3, CHAR_ASPECT};
 
 /// Preset SDF scenes
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -142,7 +142,7 @@ impl SdfScene {
             }
 
             // Convert to spherical
-            let theta = (z.z / r).acos();
+            let theta = (z.z / r.max(1e-6)).clamp(-1.0, 1.0).acos();
             let phi = z.y.atan2(z.x);
             dr = r.powf(power - 1.0) * power * dr + 1.0;
 
@@ -221,14 +221,17 @@ impl SdfScene {
 
     /// Calculate surface normal via gradient
     fn normal(&self, p: Vec3) -> Vec3 {
+        // Tetrahedral central differences: 4 samples, less bias than forward differences
         let e = 0.001;
-        let d = self.sdf(p);
-        Vec3::new(
-            self.sdf(Vec3::new(p.x + e, p.y, p.z)) - d,
-            self.sdf(Vec3::new(p.x, p.y + e, p.z)) - d,
-            self.sdf(Vec3::new(p.x, p.y, p.z + e)) - d,
-        )
-        .normalize()
+        let k = [
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+        ];
+        k.iter()
+            .fold(Vec3::ZERO, |acc, &k| acc + k * self.sdf(p + k * e))
+            .normalize()
     }
 
     /// Ray march from origin in direction, return (hit, distance, iterations)
@@ -258,6 +261,11 @@ impl SdfScene {
     }
 
     pub fn render(&self, buffer: &mut AsciiBuffer) {
+        self.render_from(buffer, self.camera_dist);
+    }
+
+    /// Render with the camera `camera_dist` units from the origin
+    fn render_from(&self, buffer: &mut AsciiBuffer, camera_dist: f32) {
         let width = buffer.width as f32;
         let height = buffer.height as f32;
 
@@ -265,7 +273,7 @@ impl SdfScene {
             return;
         }
 
-        let aspect = width / height * 0.5; // Terminal chars are ~2:1
+        let aspect = width / height / CHAR_ASPECT;
         let light_dir = Vec3::new(0.5, 1.0, -0.5).normalize();
 
         for y in 0..buffer.height {
@@ -275,7 +283,7 @@ impl SdfScene {
                 let v = (y as f32 / height - 0.5) * -2.0;
 
                 // Camera setup
-                let ray_origin = Vec3::new(0.0, 0.0, -self.camera_dist);
+                let ray_origin = Vec3::new(0.0, 0.0, -camera_dist);
                 let ray_dir = Vec3::new(u, v, 1.0).normalize();
 
                 if let Some((hit_pos, _dist)) = self.ray_march(ray_origin, ray_dir) {
@@ -292,87 +300,18 @@ impl SdfScene {
 
 // ============ Math helpers ============
 
-#[derive(Clone, Copy, Default)]
-struct Vec3 {
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-impl Vec3 {
-    const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
-
-    fn new(x: f32, y: f32, z: f32) -> Self {
-        Self { x, y, z }
+impl crate::scene::Scene for SdfScene {
+    fn update(&mut self, dt: f32) {
+        SdfScene::update(self, dt)
     }
 
-    fn length(self) -> f32 {
-        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+    fn render(&self, renderer: &Renderer, buffer: &mut AsciiBuffer) {
+        self.render_from(buffer, renderer.camera.distance)
     }
 
-    fn normalize(self) -> Self {
-        let len = self.length();
-        if len > 0.0 {
-            Self {
-                x: self.x / len,
-                y: self.y / len,
-                z: self.z / len,
-            }
-        } else {
-            self
-        }
-    }
-
-    fn dot(self, other: Self) -> f32 {
-        self.x * other.x + self.y * other.y + self.z * other.z
-    }
-
-    fn rotate_x(self, angle: f32) -> Self {
-        let (s, c) = angle.sin_cos();
-        Self {
-            x: self.x,
-            y: self.y * c - self.z * s,
-            z: self.y * s + self.z * c,
-        }
-    }
-
-    fn rotate_y(self, angle: f32) -> Self {
-        let (s, c) = angle.sin_cos();
-        Self {
-            x: self.x * c + self.z * s,
-            y: self.y,
-            z: -self.x * s + self.z * c,
-        }
-    }
-
-    fn rotate_z(self, angle: f32) -> Self {
-        let (s, c) = angle.sin_cos();
-        Self {
-            x: self.x * c - self.y * s,
-            y: self.x * s + self.y * c,
-            z: self.z,
-        }
-    }
-}
-
-impl std::ops::Add for Vec3 {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self {
-        Self::new(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
-    }
-}
-
-impl std::ops::Sub for Vec3 {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self {
-        Self::new(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
-    }
-}
-
-impl std::ops::Mul<f32> for Vec3 {
-    type Output = Self;
-    fn mul(self, rhs: f32) -> Self {
-        Self::new(self.x * rhs, self.y * rhs, self.z * rhs)
+    fn rotate(&mut self, dx: f32, dy: f32) {
+        self.rotation.x += dx;
+        self.rotation.y += dy;
     }
 }
 

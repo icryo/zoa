@@ -1,5 +1,9 @@
 use super::math::{Camera, Vec3};
-use ratatui::style::Color;
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+};
 
 /// Render mode: solid fill or wireframe edges
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -196,6 +200,40 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fragment {
     pub luminance: f32,
+    /// Exact character to show instead of one picked from the `CharStyle`
+    /// (e.g. text labels)
+    pub glyph: Option<char>,
+    /// Exact color to use instead of one picked from the `ColorPalette`
+    /// (e.g. true-color GIF pixels)
+    pub color: Option<Color>,
+}
+
+impl Fragment {
+    pub fn new(luminance: f32) -> Self {
+        Self {
+            luminance,
+            glyph: None,
+            color: None,
+        }
+    }
+
+    pub fn with_glyph(mut self, glyph: char) -> Self {
+        self.glyph = Some(glyph);
+        self
+    }
+
+    pub fn with_color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// The character and color to display for this fragment.
+    pub fn resolve(&self, style: CharStyle, palette: ColorPalette) -> (char, Color) {
+        (
+            self.glyph.unwrap_or_else(|| style.to_char(self.luminance)),
+            self.color.unwrap_or_else(|| palette.to_color(self.luminance)),
+        )
+    }
 }
 
 /// Buffer for storing rendered ASCII data with z-buffering
@@ -222,7 +260,13 @@ impl AsciiBuffer {
         self.z_buffer.fill(f32::NEG_INFINITY);
     }
 
+    /// Plot a fragment if it is closer than what is already there
+    /// (larger `depth` = closer).
     pub fn plot(&mut self, x: u16, y: u16, depth: f32, luminance: f32) {
+        self.plot_fragment(x, y, depth, Fragment::new(luminance));
+    }
+
+    pub fn plot_fragment(&mut self, x: u16, y: u16, depth: f32, fragment: Fragment) {
         if x >= self.width || y >= self.height {
             return;
         }
@@ -231,7 +275,7 @@ impl AsciiBuffer {
 
         if depth > self.z_buffer[idx] {
             self.z_buffer[idx] = depth;
-            self.buffer[idx] = Some(Fragment { luminance });
+            self.buffer[idx] = Some(fragment);
         }
     }
 
@@ -252,11 +296,31 @@ impl AsciiBuffer {
             self.z_buffer = vec![f32::NEG_INFINITY; size];
         }
     }
+
+    /// Draw the buffer into a ratatui `Buffer` at `area`, leaving empty
+    /// cells untouched.
+    pub fn draw(&self, area: Rect, buf: &mut Buffer, style: CharStyle, palette: ColorPalette) {
+        let area = area.intersection(buf.area);
+        for y in 0..area.height.min(self.height) {
+            for x in 0..area.width.min(self.width) {
+                if let Some(fragment) = self.get(x, y) {
+                    let (ch, color) = fragment.resolve(style, palette);
+                    buf[(area.x + x, area.y + y)]
+                        .set_char(ch)
+                        .set_style(Style::default().fg(color));
+                }
+            }
+        }
+    }
 }
 
 pub struct Renderer {
     pub camera: Camera,
     pub light_dir: Vec3,
+    /// Minimum brightness of surfaces facing away from the light, so they
+    /// still show up instead of vanishing into blank cells
+    pub ambient: f32,
+    pub mode: RenderMode,
 }
 
 impl Default for Renderer {
@@ -264,20 +328,174 @@ impl Default for Renderer {
         Self {
             camera: Camera::default(),
             light_dir: Vec3::new(0.0, 1.0, -1.0).normalize(),
+            ambient: 0.15,
+            mode: RenderMode::default(),
         }
     }
 }
 
+/// Tolerance on barycentric weights so neighbouring triangles leave no seams
+const EDGE_EPSILON: f32 = 1e-4;
+
 impl Renderer {
-    pub fn render_point(
-        &self,
-        buffer: &mut AsciiBuffer,
-        position: Vec3,
-        normal: Vec3,
-    ) {
+    /// Lambertian brightness plus ambient for a (unit) surface normal
+    pub fn shade(&self, normal: Vec3) -> f32 {
+        self.ambient + (1.0 - self.ambient) * normal.dot(self.light_dir).max(0.0)
+    }
+
+    pub fn render_point(&self, buffer: &mut AsciiBuffer, position: Vec3, normal: Vec3) {
         if let Some((sx, sy, depth)) = self.camera.project(position, buffer.width, buffer.height) {
-            let luminance = normal.dot(self.light_dir).max(0.0);
-            buffer.plot(sx, sy, depth, luminance);
+            buffer.plot(sx, sy, depth, self.shade(normal));
         }
+    }
+
+    /// Rasterize a filled triangle (already in view space), interpolating
+    /// the vertex normals per cell for smooth shading.
+    ///
+    /// Every cell whose center falls inside the projected triangle is drawn,
+    /// so adjoining triangles cover a surface with no gaps at any size.
+    pub fn draw_triangle(&self, buffer: &mut AsciiBuffer, positions: [Vec3; 3], normals: [Vec3; 3]) {
+        let (w, h) = (buffer.width, buffer.height);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let project = |p| self.camera.project_f(p, w, h);
+        let (Some(a), Some(b), Some(c)) = (project(positions[0]), project(positions[1]), project(positions[2])) else {
+            return;
+        };
+
+        let edge = |p: (f32, f32, f32), q: (f32, f32, f32), x: f32, y: f32| {
+            (q.0 - p.0) * (y - p.1) - (q.1 - p.1) * (x - p.0)
+        };
+        let area = edge(a, b, c.0, c.1);
+        if area.abs() < 1e-12 {
+            return;
+        }
+        let inv_area = 1.0 / area;
+
+        // Range of cells whose centers lie inside the bounding box
+        let min_x = (a.0.min(b.0).min(c.0) - 0.5).ceil().max(0.0);
+        let max_x = (a.0.max(b.0).max(c.0) - 0.5).floor().min(w as f32 - 1.0);
+        let min_y = (a.1.min(b.1).min(c.1) - 0.5).ceil().max(0.0);
+        let max_y = (a.1.max(b.1).max(c.1) - 0.5).floor().min(h as f32 - 1.0);
+
+        if min_x > max_x || min_y > max_y {
+            // Smaller than a cell: draw it as a point so fine detail
+            // (e.g. dense meshes) doesn't vanish.
+            let centroid = (positions[0] + positions[1] + positions[2]) * (1.0 / 3.0);
+            let normal = (normals[0] + normals[1] + normals[2]).normalize();
+            self.render_point(buffer, centroid, normal);
+            return;
+        }
+
+        for y in min_y as u16..=max_y as u16 {
+            let py = y as f32 + 0.5;
+            for x in min_x as u16..=max_x as u16 {
+                let px = x as f32 + 0.5;
+                let w0 = edge(b, c, px, py) * inv_area;
+                let w1 = edge(c, a, px, py) * inv_area;
+                let w2 = 1.0 - w0 - w1;
+                if w0 < -EDGE_EPSILON || w1 < -EDGE_EPSILON || w2 < -EDGE_EPSILON {
+                    continue;
+                }
+                // 1/z is linear in screen space, so this depth is exact
+                let depth = a.2 * w0 + b.2 * w1 + c.2 * w2;
+                let normal = (normals[0] * w0 + normals[1] * w1 + normals[2] * w2).normalize();
+                buffer.plot(x, y, depth, self.shade(normal));
+            }
+        }
+    }
+
+    /// Draw a continuous line between two view-space points.
+    pub fn draw_line(&self, buffer: &mut AsciiBuffer, from: Vec3, to: Vec3, from_normal: Vec3, to_normal: Vec3) {
+        let (w, h) = (buffer.width, buffer.height);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let (Some(a), Some(b)) = (self.camera.project_f(from, w, h), self.camera.project_f(to, w, h)) else {
+            return;
+        };
+        // One step per cell along the longer axis, capped for off-screen lines
+        let steps = (b.0 - a.0).abs().max((b.1 - a.1).abs()).ceil().clamp(1.0, 4096.0) as usize;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let x = a.0 + (b.0 - a.0) * t;
+            let y = a.1 + (b.1 - a.1) * t;
+            if x < 0.0 || y < 0.0 || x >= w as f32 || y >= h as f32 {
+                continue;
+            }
+            let depth = a.2 + (b.2 - a.2) * t;
+            let normal = (from_normal * (1.0 - t) + to_normal * t).normalize();
+            buffer.plot(x as u16, y as u16, depth, self.shade(normal));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn filled(buffer: &AsciiBuffer) -> usize {
+        (0..buffer.height)
+            .flat_map(|y| (0..buffer.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer.get(x, y).is_some())
+            .count()
+    }
+
+    #[test]
+    fn adjacent_triangles_leave_no_gaps() {
+        let renderer = Renderer::default();
+        let mut buffer = AsciiBuffer::new(80, 40);
+        let n = Vec3::new(0.0, 0.0, -1.0);
+        let (p0, p1, p2, p3) = (
+            Vec3::new(-1.5, -1.5, 0.0),
+            Vec3::new(1.5, -1.5, 0.0),
+            Vec3::new(1.5, 1.5, 0.0),
+            Vec3::new(-1.5, 1.5, 0.0),
+        );
+        renderer.draw_triangle(&mut buffer, [p0, p1, p2], [n; 3]);
+        renderer.draw_triangle(&mut buffer, [p0, p2, p3], [n; 3]);
+
+        // The square must be filled solid between its projected corners
+        let (x0, y0, _) = renderer.camera.project_f(p3, 80, 40).unwrap();
+        let (x1, y1, _) = renderer.camera.project_f(p1, 80, 40).unwrap();
+        for y in (y0.ceil() as u16)..(y1.floor() as u16) {
+            for x in (x0.ceil() as u16)..(x1.floor() as u16) {
+                assert!(buffer.get(x, y).is_some(), "gap at ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn nearer_triangle_wins() {
+        let renderer = Renderer::default();
+        let mut buffer = AsciiBuffer::new(40, 20);
+        let tri = |z: f32| [Vec3::new(-2.0, -2.0, z), Vec3::new(2.0, -2.0, z), Vec3::new(0.0, 2.0, z)];
+        let lit = Vec3::new(0.0, 1.0, -1.0).normalize();
+        let dark = Vec3::new(0.0, -1.0, 0.0);
+        renderer.draw_triangle(&mut buffer, tri(-1.0), [lit; 3]);
+        renderer.draw_triangle(&mut buffer, tri(1.0), [dark; 3]);
+        assert!(buffer.get(20, 10).unwrap().luminance > 0.9);
+    }
+
+    #[test]
+    fn lines_are_continuous() {
+        let renderer = Renderer::default();
+        let mut buffer = AsciiBuffer::new(80, 40);
+        let n = Vec3::new(0.0, 0.0, -1.0);
+        renderer.draw_line(&mut buffer, Vec3::new(-3.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0), n, n);
+        let row = (0..40).max_by_key(|&y| (0..80).filter(|&x| buffer.get(x, y).is_some()).count()).unwrap();
+        let xs: Vec<u16> = (0..80).filter(|&x| buffer.get(x, row).is_some()).collect();
+        assert!(xs.len() > 20);
+        assert_eq!(xs.len() as u16, xs.last().unwrap() - xs[0] + 1);
+    }
+
+    #[test]
+    fn fragment_overrides_style_and_palette() {
+        let f = Fragment::new(0.5).with_glyph('A').with_color(Color::Rgb(1, 2, 3));
+        assert_eq!(f.resolve(CharStyle::Blocks, ColorPalette::Fire), ('A', Color::Rgb(1, 2, 3)));
+        let mut buffer = AsciiBuffer::new(2, 2);
+        buffer.plot(0, 0, 1.0, 1.0);
+        assert_eq!(filled(&buffer), 1);
     }
 }

@@ -208,7 +208,7 @@ impl App {
 
         match ext.as_deref() {
             Some("gif") => {
-                let gif = AnimatedGif::from_file(&path)?;
+                let gif = AnimatedGif::from_file(&path).map_err(|e| e.to_string())?;
                 let method = if gif.used_chafa { "chafa" } else { "native" };
                 self.animated_gif_name =
                     format!("{} ({} frames, {})", gif.name, gif.frame_count(), method);
@@ -217,7 +217,7 @@ impl App {
                 Ok(())
             }
             Some("obj") | Some("stl") => {
-                let mesh = Mesh::from_file(&path)?;
+                let mesh = Mesh::from_file(&path).map_err(|e| e.to_string())?;
                 let name = path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -272,14 +272,10 @@ impl App {
             (50.0 * (self.detail as f32 / DEFAULT_DENSITY as f32)) as usize,
             (25.0 * (self.detail as f32 / DEFAULT_DENSITY as f32)) as usize,
         );
-        self.cube.set_density(self.detail * 3);
         self.sphere.set_detail(
             (40.0 * (self.detail as f32 / DEFAULT_DENSITY as f32)) as usize,
             (20.0 * (self.detail as f32 / DEFAULT_DENSITY as f32)) as usize,
         );
-        if let Some(ref mut mesh) = self.custom_mesh {
-            mesh.set_density(self.detail);
-        }
     }
 
     fn apply_speed(&mut self) {
@@ -292,7 +288,7 @@ impl App {
     }
 
     fn apply_zoom(&mut self) {
-        self.renderer.camera.scale = 40.0 * self.zoom;
+        self.renderer.camera.scale = self.zoom;
         self.renderer.camera.distance = 5.0 / self.zoom;
         // Also apply to GIF if loaded
         if let Some(ref mut gif) = self.animated_gif {
@@ -414,19 +410,20 @@ impl App {
     fn render_3d(&mut self, area: Rect) {
         self.ascii_buffer.resize(area.width, area.height);
         self.ascii_buffer.clear();
+        self.renderer.mode = self.render_mode;
 
         match self.current_shape {
             ShapeType::Torus => {
                 self.torus
-                    .render_with_mode(&self.renderer, &mut self.ascii_buffer, self.render_mode)
+                    .render(&self.renderer, &mut self.ascii_buffer)
             }
             ShapeType::Cube => {
                 self.cube
-                    .render_with_mode(&self.renderer, &mut self.ascii_buffer, self.render_mode)
+                    .render(&self.renderer, &mut self.ascii_buffer)
             }
             ShapeType::Sphere => {
                 self.sphere
-                    .render_with_mode(&self.renderer, &mut self.ascii_buffer, self.render_mode)
+                    .render(&self.renderer, &mut self.ascii_buffer)
             }
             ShapeType::CustomMesh => {
                 if let Some(ref mesh) = self.custom_mesh {
@@ -578,17 +575,7 @@ struct AsciiWidget<'a> {
 
 impl<'a> Widget for AsciiWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        for y in 0..area.height.min(self.buffer.height) {
-            for x in 0..area.width.min(self.buffer.width) {
-                if let Some(fragment) = self.buffer.get(x, y) {
-                    let ch = self.char_style.to_char(fragment.luminance);
-                    let color = self.palette.to_color(fragment.luminance);
-                    buf[(area.x + x, area.y + y)]
-                        .set_char(ch)
-                        .set_style(Style::default().fg(color));
-                }
-            }
-        }
+        self.buffer.draw(area, buf, self.char_style, self.palette);
     }
 }
 

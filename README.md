@@ -65,6 +65,38 @@ let config = ZoaConfig {
 let mut widget = ZoaWidget::new(config);
 ```
 
+## Any Scene in the Widget
+
+Particle systems, SDF scenes, and your own types can be shown in the widget
+through the `Scene` trait:
+
+```rust
+use zoa::{ParticlePreset, ParticleSystem, Scene, ZoaWidget};
+
+let mut widget = ZoaWidget::default();
+widget.set_scene(ParticleSystem::with_preset(ParticlePreset::Fire));
+
+// Your own scene: animate in `update`, draw in `render`
+struct Pulse(f32);
+impl Scene for Pulse {
+    fn update(&mut self, dt: f32) { self.0 += dt; }
+    fn render(&self, _: &zoa::Renderer, buffer: &mut zoa::AsciiBuffer) {
+        buffer.plot(buffer.width / 2, buffer.height / 2, 1.0, self.0.sin().abs());
+    }
+}
+widget.set_scene(Pulse(0.0));
+```
+
+## Cargo Features
+
+| Feature | Default | Enables |
+|---------|---------|---------|
+| `gif` | yes | Animated GIF support (pulls in `image`) |
+| `cli` | yes | The `zoa` binary (pulls in `crossterm`, `tachyonfx`, `color-eyre`) |
+
+Library users can trim dependencies with
+`zoa = { version = "0.1", default-features = false }`.
+
 ## CLI
 
 ```bash
