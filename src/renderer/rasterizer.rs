@@ -2,7 +2,7 @@ use super::math::{Camera, Vec3};
 use ratatui::style::Color;
 
 /// Render mode: solid fill or wireframe edges
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RenderMode {
     #[default]
     Solid,
@@ -26,7 +26,7 @@ impl RenderMode {
 }
 
 /// Character set styles for ASCII rendering (similar to chafa)
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CharStyle {
     #[default]
     Ascii,      // Standard ASCII gradient
@@ -93,7 +93,7 @@ impl CharStyle {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ColorPalette {
     #[default]
     Cyan,
@@ -193,7 +193,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
 }
 
 /// Fragment stores per-pixel rendering data
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fragment {
     pub luminance: f32,
 }

@@ -1,6 +1,6 @@
 use crate::renderer::{AsciiBuffer, RenderMode, Renderer, Vec3};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Cube {
     pub size: f32,
     pub rotation: Vec3,
@@ -28,7 +28,7 @@ impl Cube {
     }
 
     pub fn with_density(mut self, density: usize) -> Self {
-        self.density = density;
+        self.density = density.max(1);
         self
     }
 
@@ -144,10 +144,12 @@ impl Cube {
             Axis::Z => Vec3::new(0.0, 0.0, normal_sign),
         };
 
-        let mut u = -half;
-        while u <= half {
-            let mut v = -half;
-            while v <= half {
+        // Integer steps so float accumulation can't drop the far edge row
+        let steps = (self.size / step).round() as usize;
+        for i in 0..=steps {
+            let u = -half + i as f32 * step;
+            for j in 0..=steps {
+                let v = -half + j as f32 * step;
                 let position = match axis {
                     Axis::X => Vec3::new(fixed, u, v),
                     Axis::Y => Vec3::new(u, fixed, v),
@@ -166,10 +168,7 @@ impl Cube {
                     .normalize();
 
                 renderer.render_point(buffer, rotated_pos, rotated_normal);
-
-                v += step;
             }
-            u += step;
         }
     }
 }

@@ -20,11 +20,13 @@ use ratatui::{
 };
 
 use crate::renderer::{AsciiBuffer, CharStyle, ColorPalette, RenderMode, Renderer};
-use crate::shapes::{AnimatedGif, Countdown, Cube, Mesh, Sphere, Torus};
+#[cfg(feature = "gif")]
+use crate::shapes::AnimatedGif;
+use crate::shapes::{Countdown, Cube, Mesh, Sphere, Torus};
 use std::time::Duration;
 
 /// Which shape to render
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Shape {
     #[default]
     Torus,
@@ -43,7 +45,7 @@ impl Shape {
 }
 
 /// Configuration for the ZoaWidget
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ZoaConfig {
     pub shape: Shape,
     pub char_style: CharStyle,
@@ -79,11 +81,14 @@ pub struct ZoaWidget {
     cube: Cube,
     sphere: Sphere,
     custom_mesh: Option<Mesh>,
+    #[cfg(feature = "gif")]
     gif: Option<AnimatedGif>,
     countdown: Option<Countdown>,
     renderer: Renderer,
     buffer: AsciiBuffer,
     config: ZoaConfig,
+    /// Config last pushed into the shapes, so `config_mut` edits get picked up
+    applied_config: ZoaConfig,
 }
 
 impl Default for ZoaWidget {
@@ -100,10 +105,12 @@ impl ZoaWidget {
             cube: Cube::default(),
             sphere: Sphere::default(),
             custom_mesh: None,
+            #[cfg(feature = "gif")]
             gif: None,
             countdown: None,
             renderer: Renderer::default(),
             buffer: AsciiBuffer::new(80, 24),
+            applied_config: config.clone(),
             config,
         };
         widget.apply_config();
@@ -112,8 +119,11 @@ impl ZoaWidget {
 
     /// Create with a custom mesh
     pub fn with_mesh(mesh: Mesh) -> Self {
-        let mut widget = Self::default();
-        widget.custom_mesh = Some(mesh);
+        let mut widget = Self {
+            custom_mesh: Some(mesh),
+            ..Self::default()
+        };
+        widget.apply_config();
         widget
     }
 
@@ -190,11 +200,16 @@ impl ZoaWidget {
     pub fn load_mesh(&mut self, path: &std::path::Path) -> Result<(), String> {
         let mesh = Mesh::from_file(path)?;
         self.custom_mesh = Some(mesh);
-        self.gif = None; // Clear any loaded GIF
+        #[cfg(feature = "gif")]
+        {
+            self.gif = None; // Clear any loaded GIF
+        }
+        self.apply_config(); // Match the configured density and speed
         Ok(())
     }
 
     /// Load an animated GIF from file
+    #[cfg(feature = "gif")]
     pub fn load_gif(&mut self, path: &std::path::Path) -> Result<(), String> {
         let gif = AnimatedGif::from_file(path)?;
         self.gif = Some(gif);
@@ -203,6 +218,7 @@ impl ZoaWidget {
     }
 
     /// Check if a GIF is currently loaded
+    #[cfg(feature = "gif")]
     pub fn has_gif(&self) -> bool {
         self.gif.is_some()
     }
@@ -212,7 +228,10 @@ impl ZoaWidget {
         let mut countdown = Countdown::new(duration);
         countdown.start();
         self.countdown = Some(countdown);
-        self.gif = None;
+        #[cfg(feature = "gif")]
+        {
+            self.gif = None;
+        }
         self.custom_mesh = None;
     }
 
@@ -221,7 +240,10 @@ impl ZoaWidget {
         let mut countdown = Countdown::parse(duration_str)?;
         countdown.start();
         self.countdown = Some(countdown);
-        self.gif = None;
+        #[cfg(feature = "gif")]
+        {
+            self.gif = None;
+        }
         self.custom_mesh = None;
         Ok(())
     }
@@ -246,6 +268,7 @@ impl ZoaWidget {
     }
 
     fn apply_config(&mut self) {
+        self.applied_config = self.config.clone();
         let density = self.config.density;
         let speed = self.config.speed;
         let zoom = self.config.zoom;
@@ -279,7 +302,12 @@ impl ZoaWidget {
 
     /// Update animation state. Call this each frame with delta time in seconds.
     pub fn update(&mut self, dt: f32) {
+        if self.config != self.applied_config {
+            self.apply_config();
+        }
+
         // GIF always animates (it's frame-based, not rotation)
+        #[cfg(feature = "gif")]
         if let Some(ref mut gif) = self.gif {
             gif.update(dt);
             return;
@@ -308,6 +336,7 @@ impl ZoaWidget {
         self.buffer.clear();
 
         // GIF renders directly to buffer (handles its own scaling)
+        #[cfg(feature = "gif")]
         if let Some(ref gif) = self.gif {
             gif.render(&mut self.buffer);
             return;
@@ -354,8 +383,10 @@ impl Widget for &mut ZoaWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "gif")]
     use std::path::Path;
 
+    #[cfg(feature = "gif")]
     #[test]
     fn test_widget_load_gif() {
         let gif_path = Path::new("samples/test.gif");
@@ -379,6 +410,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gif")]
     #[test]
     fn test_widget_gif_clears_mesh() {
         let gif_path = Path::new("samples/test.gif");
@@ -421,13 +453,16 @@ mod tests {
         widget.render_to_buffer(5, 3);
 
         // Test GIF at tiny sizes if available
-        let gif_path = Path::new("samples/test.gif");
-        if gif_path.exists() {
-            let mut widget = ZoaWidget::default();
-            widget.load_gif(gif_path).unwrap();
-            widget.render_to_buffer(0, 0);
-            widget.render_to_buffer(1, 1);
-            widget.render_to_buffer(3, 2);
+        #[cfg(feature = "gif")]
+        {
+            let gif_path = Path::new("samples/test.gif");
+            if gif_path.exists() {
+                let mut widget = ZoaWidget::default();
+                widget.load_gif(gif_path).unwrap();
+                widget.render_to_buffer(0, 0);
+                widget.render_to_buffer(1, 1);
+                widget.render_to_buffer(3, 2);
+            }
         }
     }
 }

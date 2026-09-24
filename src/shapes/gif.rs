@@ -1,4 +1,4 @@
-//! GIF animation support for orb
+//! GIF animation support for zoa
 //!
 //! This module provides animated GIF playback as ASCII art.
 //! Frames are converted to ASCII at render time to adapt to terminal size.
@@ -99,13 +99,16 @@ impl AnimatedGif {
 
     /// Update animation state
     pub fn update(&mut self, dt: f32) {
-        self.elapsed += Duration::from_secs_f32(dt);
+        self.elapsed += crate::shapes::dt_to_duration(dt);
 
-        if let Some(frame) = self.frames.get(self.current_frame) {
-            if self.elapsed >= frame.delay {
-                self.elapsed = Duration::ZERO;
-                self.current_frame = (self.current_frame + 1) % self.frames.len();
+        // Carry leftover time into the next frame (and skip frames on long
+        // updates) so playback speed matches the GIF's timing.
+        while let Some(frame) = self.frames.get(self.current_frame) {
+            if self.elapsed < frame.delay {
+                break;
             }
+            self.elapsed -= frame.delay;
+            self.current_frame = (self.current_frame + 1) % self.frames.len();
         }
     }
 
@@ -216,6 +219,38 @@ mod tests {
             assert!(out_w > buf_w / 4, "Output too small horizontally");
             assert!(out_h > buf_h / 4, "Output too small vertically");
         }
+    }
+
+    #[test]
+    fn test_frame_timing_carries_remainder() {
+        let frame = |ms| GifFrame {
+            image: image::RgbaImage::new(1, 1),
+            delay: Duration::from_millis(ms),
+        };
+        let mut gif = AnimatedGif {
+            frames: vec![frame(100), frame(100), frame(100)],
+            current_frame: 0,
+            elapsed: Duration::ZERO,
+            name: String::new(),
+            width: 1,
+            height: 1,
+            used_chafa: false,
+            scale: 1.0,
+        };
+
+        // Three 60ms ticks = 180ms: one frame advanced, 80ms carried over
+        for _ in 0..3 {
+            gif.update(0.06);
+        }
+        assert_eq!(gif.current_frame, 1);
+
+        // A long stall skips ahead instead of advancing a single frame
+        gif.update(0.25);
+        assert_eq!(gif.current_frame, 1); // 80+250ms: advances through 2, 0, then 1
+
+        // Invalid deltas are ignored rather than panicking
+        gif.update(-1.0);
+        gif.update(f32::NAN);
     }
 
     #[test]

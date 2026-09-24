@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Triangle {
     pub vertices: [Vec3; 3],
     pub normal: Vec3,
@@ -27,7 +27,7 @@ impl Triangle {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Mesh {
     pub triangles: Vec<Triangle>,
     pub rotation: Vec3,
@@ -62,7 +62,7 @@ impl Mesh {
     }
 
     pub fn with_density(mut self, density: usize) -> Self {
-        self.density = density;
+        self.density = density.max(1);
         self
     }
 
@@ -116,13 +116,14 @@ impl Mesh {
                     let mut tri = Triangle::new(v0, v1, v2);
 
                     // Use provided normals if available (average vertex normals for face)
-                    if !normals.is_empty() && i0 * 3 + 2 < normals.len() {
-                        let n0 = Vec3::new(
-                            normals[i0 * 3],
-                            normals[i0 * 3 + 1],
-                            normals[i0 * 3 + 2],
-                        );
-                        tri.normal = n0.normalize();
+                    let normal_at = |i: usize| {
+                        normals.get(i * 3..i * 3 + 3).map(|n| Vec3::new(n[0], n[1], n[2]))
+                    };
+                    if let (Some(n0), Some(n1), Some(n2)) = (normal_at(i0), normal_at(i1), normal_at(i2)) {
+                        let avg = n0 + n1 + n2;
+                        if avg.dot(avg) > 0.0 {
+                            tri.normal = avg.normalize();
+                        }
                     }
 
                     triangles.push(tri);
@@ -253,9 +254,15 @@ impl Mesh {
         reader.read_exact(&mut header)
             .map_err(|e| format!("Failed to read STL header: {}", e))?;
 
-        // Check if it starts with "solid" (ASCII) but also check it's not binary
+        // Many binary exporters also start the header with "solid", so trust
+        // the binary layout whenever the file size matches it exactly.
+        let mut count_bytes = [0u8; 4];
+        let binary_size_matches = reader.read_exact(&mut count_bytes).is_ok()
+            && std::fs::metadata(path.as_ref()).is_ok_and(|m| {
+                m.len() == 84 + 50 * u64::from(u32::from_le_bytes(count_bytes))
+            });
         let header_str = String::from_utf8_lossy(&header);
-        let is_ascii = header_str.trim_start().starts_with("solid");
+        let is_ascii = !binary_size_matches && header_str.trim_start().starts_with("solid");
 
         // Reopen file for proper parsing
         let file = File::open(path.as_ref())
@@ -282,7 +289,7 @@ impl Mesh {
 
         for line in reader.lines() {
             let line = line.map_err(|e| format!("Read error: {}", e))?;
-            let parts: Vec<&str> = line.trim().split_whitespace().collect();
+            let parts: Vec<&str> = line.split_whitespace().collect();
 
             if parts.is_empty() {
                 continue;
@@ -371,6 +378,44 @@ impl Mesh {
             "obj" => Self::from_obj(path),
             "stl" => Self::from_stl(path),
             _ => Err(format!("Unsupported file format: .{} (use .obj or .stl)", ext)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_binary_stl_with_solid_header() {
+        // Binary STL whose header starts with "solid", as many exporters write
+        let mut data = Vec::new();
+        let mut header = [b' '; 80];
+        header[..11].copy_from_slice(b"solid model");
+        data.extend_from_slice(&header);
+        data.extend_from_slice(&1u32.to_le_bytes());
+        let floats: [f32; 12] = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        for f in floats {
+            data.extend_from_slice(&f.to_le_bytes());
+        }
+        data.extend_from_slice(&[0u8; 2]);
+
+        let path = std::env::temp_dir().join(format!("zoa_solid_header_{}.stl", std::process::id()));
+        std::fs::write(&path, &data).unwrap();
+        let mesh = Mesh::from_stl(&path);
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(mesh.expect("binary STL should parse").triangle_count(), 1);
+    }
+
+    #[test]
+    fn test_sample_meshes_load() {
+        for name in ["samples/bunny.stl", "samples/tetrahedron.stl", "samples/pyramid.obj", "samples/icosahedron.obj"] {
+            let path = Path::new(name);
+            if path.exists() {
+                let mesh = Mesh::from_file(path).unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert!(mesh.triangle_count() > 0);
+            }
         }
     }
 }

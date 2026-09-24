@@ -45,7 +45,7 @@ impl Particle {
 }
 
 /// Emitter shape for spawning particles
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EmitterShape {
     Point,
     Line { length: f32 },
@@ -54,7 +54,7 @@ pub enum EmitterShape {
 }
 
 /// Preset particle effects
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ParticlePreset {
     #[default]
     Fire,
@@ -391,7 +391,7 @@ impl ParticleSystem {
 fn fastrand() -> f32 {
     use std::cell::Cell;
     thread_local! {
-        static STATE: Cell<u32> = Cell::new(0xDEADBEEF);
+        static STATE: Cell<u32> = const { Cell::new(0xDEADBEEF) };
     }
     STATE.with(|s| {
         let mut x = s.get();

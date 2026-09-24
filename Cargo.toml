@@ -18,6 +18,19 @@ path = "src/lib.rs"
 [[bin]]
 name = "zoa"
 path = "src/main.rs"
+required-features = ["gif"]
+
+[[example]]
+name = "gif_demo"
+required-features = ["gif"]
+
+[[example]]
+name = "showcase"
+required-features = ["gif"]
+
+[[example]]
+name = "stress_test"
+required-features = ["gif"]
 
 [dependencies]
 ratatui = "0.29"
@@ -25,8 +38,8 @@ tachyonfx = "0.9"
 crossterm = "0.28"
 color-eyre = "0.6"
 tobj = "4.0"
-image = { version = "0.25", default-features = false, features = ["gif"] }
+image = { version = "0.25", default-features = false, features = ["gif"], optional = true }
 
 [features]
 default = ["gif"]
-gif = []  # GIF animation support - can be disabled if not needed
+gif = ["dep:image"]  # GIF animation support - disable to drop the image dependency

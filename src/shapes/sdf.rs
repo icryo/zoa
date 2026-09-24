@@ -6,7 +6,7 @@
 use crate::renderer::AsciiBuffer;
 
 /// Preset SDF scenes
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum SdfPreset {
     #[default]
     Metaballs,

@@ -230,9 +230,7 @@ impl App {
                 self.apply_detail();
                 Ok(())
             }
-            _ => Err(format!(
-                "Unsupported file format. Supported: .obj, .stl, .gif"
-            )),
+            _ => Err("Unsupported file format. Supported: .obj, .stl, .gif".to_string()),
         }
     }
 
@@ -846,8 +844,8 @@ fn run_monitor(mut terminal: DefaultTerminal, mut app: App, command: &str) -> Re
         // Allow user to cancel with 'q' or Escape
         if event::poll(Duration::ZERO)? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+                if key.kind == KeyEventKind::Press
+                    && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
                         // Kill the child process
                         let _ = child.kill();
                         let _ = child.wait();
@@ -857,7 +855,6 @@ fn run_monitor(mut terminal: DefaultTerminal, mut app: App, command: &str) -> Re
                         eprintln!("Cancelled");
                         return Ok(());
                     }
-                }
             }
         }
 
@@ -923,11 +920,10 @@ fn run_interactive(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
 
         if event::poll(Duration::ZERO)? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if app.handle_key(key.code) {
+                if key.kind == KeyEventKind::Press
+                    && app.handle_key(key.code) {
                         break;
                     }
-                }
             }
         }
 

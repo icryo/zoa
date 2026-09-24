@@ -1,7 +1,7 @@
 use crate::renderer::{AsciiBuffer, RenderMode, Renderer, Vec3};
 use std::f32::consts::PI;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Sphere {
     pub radius: f32,
     pub rotation: Vec3,

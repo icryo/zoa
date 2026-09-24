@@ -52,5 +52,7 @@ pub mod widget;
 
 // Re-export main types for convenience
 pub use renderer::{AsciiBuffer, Camera, CharStyle, ColorPalette, Fragment, RenderMode, Renderer, Vec3};
-pub use shapes::{AnimatedGif, Countdown, Cube, Mesh, ParticlePreset, ParticleSystem, SdfPreset, SdfScene, Sphere, Torus, Triangle};
+#[cfg(feature = "gif")]
+pub use shapes::AnimatedGif;
+pub use shapes::{Countdown, Cube, Mesh, ParticlePreset, ParticleSystem, SdfPreset, SdfScene, Sphere, Torus, Triangle};
 pub use widget::{ZoaConfig, ZoaWidget, Shape};

@@ -138,7 +138,7 @@ fn pattern_width(pattern: &[&str]) -> usize {
 }
 
 /// Countdown timer state
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CountdownState {
     Running,
     Paused,
@@ -235,21 +235,26 @@ impl Countdown {
         for c in s.chars() {
             if c.is_ascii_digit() {
                 current_num.push(c);
+            } else if c.is_whitespace() {
+                continue;
             } else {
-                let num: u64 = current_num.parse().unwrap_or(0);
+                let multiplier = match c {
+                    'h' | 'H' => 3600,
+                    'm' | 'M' => 60,
+                    's' | 'S' => 1,
+                    _ => return Err(format!("Invalid duration unit '{}'", c)),
+                };
+                let num: u64 = current_num
+                    .parse()
+                    .map_err(|_| format!("Missing number before '{}'", c))?;
                 current_num.clear();
-                match c {
-                    'h' | 'H' => total_secs += num * 3600,
-                    'm' | 'M' => total_secs += num * 60,
-                    's' | 'S' => total_secs += num,
-                    _ => {}
-                }
+                total_secs += num * multiplier;
             }
         }
 
-        // If just a number, treat as seconds
-        if !current_num.is_empty() && total_secs == 0 {
-            total_secs = current_num.parse().unwrap_or(0);
+        // A trailing bare number counts as seconds ("90" or "5m30")
+        if !current_num.is_empty() {
+            total_secs += current_num.parse::<u64>().map_err(|_| "Invalid duration")?;
         }
 
         if total_secs == 0 {
@@ -314,7 +319,8 @@ impl Countdown {
     /// Update the timer (call each frame)
     pub fn update(&mut self, dt: f32) {
         // Update blink state
-        self.blink_elapsed += Duration::from_secs_f32(dt);
+        let elapsed = super::dt_to_duration(dt);
+        self.blink_elapsed += elapsed;
         if self.blink_elapsed >= Duration::from_millis(500) {
             self.blink_elapsed = Duration::ZERO;
             self.blink = !self.blink;
@@ -324,7 +330,6 @@ impl Countdown {
             return;
         }
 
-        let elapsed = Duration::from_secs_f32(dt);
         if self.remaining > elapsed {
             self.remaining -= elapsed;
         } else {
@@ -498,6 +503,25 @@ mod tests {
 
         let c = Countdown::parse("1:30:00").unwrap();
         assert_eq!(c.remaining().as_secs(), 5400);
+
+        let c = Countdown::parse("5m30").unwrap();
+        assert_eq!(c.remaining().as_secs(), 330);
+
+        let c = Countdown::parse("1h 15m").unwrap();
+        assert_eq!(c.remaining().as_secs(), 4500);
+
+        assert!(Countdown::parse("1h5x").is_err());
+        assert!(Countdown::parse("m").is_err());
+        assert!(Countdown::parse("0s").is_err());
+    }
+
+    #[test]
+    fn test_update_ignores_invalid_dt() {
+        let mut c = Countdown::from_secs(10);
+        c.start();
+        c.update(-1.0);
+        c.update(f32::NAN);
+        assert_eq!(c.remaining().as_secs(), 10);
     }
 
     #[test]

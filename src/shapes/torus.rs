@@ -1,7 +1,7 @@
 use crate::renderer::{AsciiBuffer, RenderMode, Renderer, Vec3};
 use std::f32::consts::PI;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Torus {
     pub r1: f32, // tube radius
     pub r2: f32, // torus radius (distance from center to tube center)

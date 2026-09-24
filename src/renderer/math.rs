@@ -1,6 +1,6 @@
 use std::ops::{Add, Mul, Sub};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -90,7 +90,10 @@ impl Mul<f32> for Vec3 {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Terminal character cells are roughly twice as tall as they are wide.
+const CHAR_ASPECT: f32 = 2.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
     pub distance: f32,
     pub scale: f32,
@@ -118,9 +121,10 @@ impl Camera {
         }
 
         let inv_z = 1.0 / z;
-        let aspect = screen_width as f32 / screen_height as f32 * 0.5;
 
-        let screen_x = (screen_width as f32 / 2.0 + point.x * self.scale * inv_z * aspect) as i32;
+        // Compensate for tall character cells only, so shapes keep their
+        // proportions regardless of the render area's aspect ratio.
+        let screen_x = (screen_width as f32 / 2.0 + point.x * self.scale * inv_z * CHAR_ASPECT) as i32;
         let screen_y = (screen_height as f32 / 2.0 - point.y * self.scale * inv_z) as i32;
 
         if screen_x >= 0 && screen_x < screen_width as i32 && screen_y >= 0 && screen_y < screen_height as i32 {
