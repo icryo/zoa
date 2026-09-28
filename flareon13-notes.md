@@ -162,3 +162,33 @@ Next moves if resumed (in order of promise):
   disassembly reading — the control flow is flattened and the decoders are virtualized.
 - Know when to checkpoint: one crackme should not consume a whole engagement. Map it, capture reusable
   tooling and an honest "here's exactly where the gate is", and report rather than churn.
+
+### 8 (continued) — flag-construction transform located (session 3)
+Deeper CDP + disassembly of `func 2374` (the per-element processor called from func 2362's loop):
+- `func 2374` runs in two coroutine phases. **Phase 1** (entry state) parses the input via
+  `call 2369 → 2375 → 2363` (syscall/js value handling), passes a constant gate at `0x281f64`
+  (`(mem_i64[sp+16] | 1) == 7`; the value is always 6, so it always passes), and **returns
+  input-independent js.Value refs** (`sp+168 ≈ 0x7ff8_0002_...`, `sp+176 = 0x30FDA8`) — i.e. phase 1
+  does not branch on input content. Confirmed: 28- vs 44-char, hex, base64, email, etc. all produce a
+  byte-identical 568-instruction path through func 2362 and never reach phase 2.
+- **Phase 2** (a later resume state, entry `0x282047`, transform at `0x2820a1`) is the FLAG BUILDER and is
+  only reached on the success path. It does:
+  `memory.copy 32 bytes from 0x469D7 → sp+56`, then a long series of fixed per-offset byte ops, e.g.
+  `buf[19]-=9; buf[18]+=9; buf[26]=old+18; buf[1]-=9; buf[6]+=125('}'); buf[?]+=local2; buf[?]-=local3 …`,
+  interleaved with reads of **input-derived bytes at sp+49..55** (the ~7 bytes tied to the `==7` gate).
+  So the output/flag = f(32-byte constant @0x469D7, ~7 input bytes) — the flag genuinely depends on
+  correct input; it is never present in memory for wrong input (re-confirmed).
+- Constant source bytes @0x469D7 (32):
+  `4648e91eab15127b31c56b58ebd16a73fb17d5ac735272970a2728cfbeacd5b8`.
+- Standalone printable constants injected by the transform include `}` (125), `!` (33), `0` (48), `D` (68) —
+  consistent with a `...}` / flag-suffix tail being assembled.
+
+Remaining blocker: what makes phase 1 "succeed" (i.e. sets the continuation that enters phase 2) is decided
+in func 2362 after phase 1 returns and is not a simple input-length/format check — it hinges on the
+js.Value pipeline (2369/2375/2363) and the loop's `func 1380` result. Cracking it needs either:
+(a) fully decompiling phases 1–2 to express the constraint on the ~7 input bytes and solving it, or
+(b) live-patching func 2362's post-phase-1 branch to force phase 2 and reading sp+49..55 vs the required
+    output (risking a wrong flag since the transform consumes input bytes).
+
+Reusable: `Debugger.evaluateOnCallFrame` on a JS frame + `window._wasmInstance.exports.getsp()/mem` reads
+the Go stack live while paused; breakpoints set after init cleanly isolate check-time from init-time.
